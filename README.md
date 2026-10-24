@@ -128,6 +128,35 @@ the auto-detected RPM `Requires` (`requiresExclude` in `pubspec.yaml`), so
 the standard generated spec installs without manual tweaks. See
 `aurora/prebuilt/BUILD.md` for how the prebuilt libraries are produced.
 
+## Running the integration tests
+
+The tests in `example/integration_test/` exercise the real native plugin on a
+device: encrypted open / read-back / wrong password / at-rest encryption
+(`plugin_integration_test.dart`) and transaction-state handling, including a
+failed COMMIT (`transaction_state_test.dart`).
+
+Prerequisites:
+
+- Docker running (the app RPM is built in the `aurora-build-tools` container);
+- an emulator or device started, e.g.
+  `flutter-aurora emulators --launch <image>`;
+- the app's sailjail permissions granted **before the first test run** — a
+  first run blocks on the permission prompt, which kills an unattended
+  `flutter test` (see [Emulator specifics](#integrating-an-existing-app));
+- the device id from `flutter-aurora doctor -v` (the emulator is not listed by
+  `flutter-aurora devices`).
+
+From the `example/` directory:
+
+```sh
+flutter-aurora test integration_test/plugin_integration_test.dart -d <device-id>
+# or the whole suite:
+flutter-aurora test integration_test -d <device-id>
+```
+
+The unit/widget tests in `example/test/` and the package tests in `test/` run
+on the host with a regular `flutter test` and need no device.
+
 ## License
 
 See [LICENSE](LICENSE).
