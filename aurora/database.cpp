@@ -500,6 +500,16 @@ void Database::resyncTransactionState() {
   }
 }
 
+void Database::abortTransaction() {
+  if (db_ && sqlite3_get_autocommit(db_) == 0) {
+    // The handle is still inside the transaction (e.g. a deferred
+    // constraint rejected the COMMIT). End it; best effort, the client
+    // already receives the original error.
+    sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+  }
+  currentTransactionID_ = DatabaseTransaction::ID::None;
+}
+
 void Database::enterInTransaction() {
   transactionID_ += 1;
   currentTransactionID_ = transactionID_;

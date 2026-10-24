@@ -8,6 +8,9 @@
 //   not clear the state,
 // - a failed statement must not clear the state (SQLite keeps the
 //   transaction open after an error),
+// - a failed COMMIT/ROLLBACK must not leave a dead id behind: the Dart
+//   client marks the transaction closed and will never reference it again,
+//   so the plugin rolls the transaction back natively and clears the state,
 // - a queued command must never be executed inside a transaction it does not
 //   belong to.
 //
@@ -147,5 +150,63 @@ void main() {
     await bFuture;
 
     expect((await allX(dbB)).map((row) => row['x']), [1, 99]);
+  });
+
+  testWidgets('failed commit (deferred FK): state resets, next command runs',
+      (tester) async {
+    final db = await sqlcipher.openDatabase(dbPath,
+        password: password, singleInstance: true);
+    addTearDown(() async {
+      try {
+        await db.close();
+      } catch (_) {}
+    });
+
+    await db.execute('PRAGMA foreign_keys = ON');
+    await db.execute('CREATE TABLE parent(id INTEGER PRIMARY KEY)');
+    await db.execute('CREATE TABLE child(parent_id INTEGER '
+        'REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)');
+
+    // The INSERT succeeds; the deferred constraint rejects the COMMIT, but
+    // the SQLite handle stays inside the transaction.
+    var commitFailed = false;
+    try {
+      await db.transaction((txn) async {
+        await txn.execute('INSERT INTO child(parent_id) VALUES (99)');
+      });
+    } on sqlcipher.DatabaseException {
+      commitFailed = true;
+    }
+    expect(commitFailed, isTrue);
+
+    // The Dart client has closed the transaction and will never reference
+    // its id again. The plugin must not keep the dead id: a plain
+    // statement must complete instead of waiting for a transaction that
+    // will never come. The plugin already rolled the transaction back
+    // natively, so the explicit ROLLBACK may complete as a no-op error;
+    // either way it must not hang.
+    try {
+      await db.execute('ROLLBACK').timeout(const Duration(seconds: 10));
+    } on sqlcipher.DatabaseException {
+      // Already rolled back natively.
+    }
+    expect(
+        (await db
+                .rawQuery('SELECT count(*) AS n FROM child')
+                .timeout(const Duration(seconds: 10)))
+            .first['n'],
+        0);
+
+    // And a fresh transaction still works end to end.
+    await db.transaction((txn) async {
+      await txn.execute('INSERT INTO parent(id) VALUES (1)');
+      await txn.execute('INSERT INTO child(parent_id) VALUES (1)');
+    });
+    expect(
+        (await db
+                .rawQuery('SELECT count(*) AS n FROM child')
+                .timeout(const Duration(seconds: 10)))
+            .first['n'],
+        1);
   });
 }

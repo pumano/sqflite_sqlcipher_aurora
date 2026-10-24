@@ -298,10 +298,21 @@ void SqfliteSqlcipherAuroraPlugin::onExecuteCall(const MethodCall& call, std::un
       }
       const auto error = db->execute(sql, sqlArgs);
       if (error) {
-        // A failed statement does not end an open transaction (SQLite
-        // keeps it); a failed BEGIN leaves no transaction. Align the
-        // bookkeeping with the actual handle state.
-        db->resyncTransactionState();
+        if (inTransactionChange.has_value() && !*inTransactionChange) {
+          // A failed COMMIT/ROLLBACK: the Dart client (sqflite_common)
+          // marks the transaction closed in a `finally` even when this
+          // statement fails and will never reference this id again. If the
+          // handle is still inside the transaction (e.g. a deferred
+          // constraint rejected the COMMIT), roll it back natively and clear
+          // the bookkeeping; keeping the id would leave every subsequent
+          // non-transactional command queued behind it forever.
+          db->abortTransaction();
+        } else {
+          // A failed statement does not end an open transaction (SQLite
+          // keeps it); a failed BEGIN leaves no transaction. Align the
+          // bookkeeping with the actual handle state.
+          db->resyncTransactionState();
+        }
         result->Error(Errors::Sqflite,
                       formatError(Errors::Internal, error.message()),
                       makeSqlErrorDetails(sql, sqlArgs));
