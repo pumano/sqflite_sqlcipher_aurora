@@ -10,7 +10,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  plugin_platform_interface: ^2.0.2
+  # Provides the CMake module (AuroraClientWrapper) and the client_wrapper
+  # headers used by the native plugin (method channel, encodable values).
+  # Its Dart side is unused; the dependency exists for the native build only.
   aurora_client_wrapper: ^1.0.0
 
 dev_dependencies:

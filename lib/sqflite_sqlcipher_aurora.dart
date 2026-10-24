@@ -6,7 +6,7 @@
 /// to that channel directly, so this library only needs to exist to satisfy
 /// the plugin's `default_package` declaration. It intentionally has no Dart
 /// logic of its own.
-library sqflite_sqlcipher_aurora;
+library;
 
 /// Placeholder so the package has a public entry point.
 class SqfliteSqlcipherAurora {
