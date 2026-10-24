@@ -30,6 +30,15 @@ void addError(Database::EncodableList &results, const utils::error &error,
   }
 }
 
+// sqlite3_column_text() returns a NUL-terminated C string, but the value
+// itself may contain embedded NUL bytes, so the copy must use the explicit
+// length from sqlite3_column_bytes() instead of strlen().
+std::string textColumnValue(sqlite3_stmt *stmt, int idx) {
+  const char *text =
+      reinterpret_cast<const char *>(sqlite3_column_text(stmt, idx));
+  return std::string(text, sqlite3_column_bytes(stmt, idx));
+}
+
 template <typename T> void addResult(Database::EncodableList &results, const T &result) {
   results.emplace_back(Database::EncodableMap{{"result", result}});
 }
@@ -303,8 +312,7 @@ utils::error Database::query(const std::string &sql, const EncodableList &args,
           row.emplace_back(sqlite3_column_double(stmt, idx));
           break;
         case SQLITE_TEXT:
-          row.emplace_back(
-              reinterpret_cast<const char *>(sqlite3_column_text(stmt, idx)));
+          row.emplace_back(textColumnValue(stmt, idx));
           break;
         case SQLITE_BLOB: {
           const uint8_t *blob =
@@ -631,8 +639,7 @@ utils::error Database::resultFromCursor(const Cursor &cursor,
           row.emplace_back(sqlite3_column_double(cursor.stmt, idx));
           break;
         case SQLITE_TEXT:
-          row.emplace_back(reinterpret_cast<const char *>(
-              sqlite3_column_text(cursor.stmt, idx)));
+          row.emplace_back(textColumnValue(cursor.stmt, idx));
           break;
         case SQLITE_BLOB: {
           const uint8_t *blob = reinterpret_cast<const uint8_t *>(
