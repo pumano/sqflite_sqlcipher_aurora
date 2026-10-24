@@ -141,7 +141,12 @@ utils::error Database::setKey(const std::string &password) {
   char *errmsg = nullptr;
   const int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &errmsg);
   if (rc != SQLITE_OK) {
+    // errmsg is allocated by SQLite and must be freed; the message is
+    // copied into the error before the free.
     const auto message = errmsg ? errmsg : sqlite3_errmsg(db_);
+    if (errmsg) {
+      sqlite3_free(errmsg);
+    }
     return utils::error(message, rc);
   }
   return utils::error::none();
