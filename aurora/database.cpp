@@ -515,10 +515,6 @@ void Database::enterInTransaction() {
   currentTransactionID_ = transactionID_;
 }
 
-void Database::leaveTransaction() {
-  currentTransactionID_ = DatabaseTransaction::ID::None;
-}
-
 int Database::currentTransactionID() { return currentTransactionID_; }
 
 bool Database::isOpen() const { return db_ != nullptr; }

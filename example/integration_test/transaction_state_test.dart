@@ -245,4 +245,79 @@ void main() {
     final rows = await db.query('t', columns: ['v']);
     expect(rows.map((r) => r['v']), ['kept', 'after']);
   });
+
+  test('failed extended ROLLBACK TO keeps the outer transaction atomic',
+      () async {
+    final db = await sqlcipher.openDatabase(dbPath,
+        password: password, singleInstance: true);
+    await db.execute('CREATE TABLE t(v TEXT)');
+    try {
+      await db.transaction((txn) async {
+        await txn.insert('t', {'v': 'before'});
+        try {
+          // `TRANSACTION` is optional in `ROLLBACK [TRANSACTION] TO`;
+          // the client still flags this `inTransaction: false`.
+          await txn.execute('ROLLBACK TRANSACTION TO missing_savepoint');
+        } on sqlcipher.DatabaseException {
+          // SQLite leaves the outer transaction open.
+        }
+        await txn.insert('t', {'v': 'after'});
+        throw StateError('Roll back the outer transaction');
+      });
+    } catch (_) {
+      // The transaction failed: neither row may have been committed.
+    }
+    expect(await db.query('t'), isEmpty);
+  });
+
+  test('successful extended ROLLBACK TO keeps the transaction open',
+      () async {
+    final db = await sqlcipher.openDatabase(dbPath,
+        password: password, singleInstance: true);
+    await db.execute('CREATE TABLE t(v TEXT)');
+    await db.transaction((txn) async {
+      await txn.insert('t', {'v': 'kept'});
+      await txn.execute('SAVEPOINT sp');
+      await txn.insert('t', {'v': 'discarded'});
+      await txn.execute('ROLLBACK TRANSACTION TO SAVEPOINT sp');
+      await txn.insert('t', {'v': 'after'});
+    });
+    final rows = await db.query('t', columns: ['v']);
+    expect(rows.map((r) => r['v']), ['kept', 'after']);
+  });
+
+  test('ROLLBACK TO with a comment: queued foreign command stays out',
+      () async {
+    final dbA = await sqlcipher.openDatabase(dbPath,
+        password: password, singleInstance: true);
+    final dbB = await sqlcipher.openDatabase(dbPath,
+        password: password, singleInstance: true);
+    await dbA.execute('CREATE TABLE t(x INTEGER UNIQUE NOT NULL)');
+    addTearDown(() async {
+      try {
+        await dbA.close();
+      } catch (_) {}
+      try {
+        await dbB.close();
+      } catch (_) {}
+    });
+
+    final txn = await begin(dbA);
+    await txn.execute('INSERT INTO t(x) VALUES (1)');
+    await txn.execute('SAVEPOINT sp');
+
+    // Not awaited yet: it must be queued while A's transaction is open.
+    final bFuture = dbB.execute('INSERT INTO t(x) VALUES (99)');
+
+    // A comment between the keywords is still a rollback to a savepoint,
+    // not a full rollback: the transaction stays open, so B's statement
+    // must not be drained into it.
+    await txn.execute('ROLLBACK /* note */ TO sp');
+    await end(dbA, txn, commit: false); // ROLLBACK
+    await bFuture; // must complete after A's transaction is gone
+
+    // A's row is rolled back; B's row is committed by itself, not lost
+    // together with A's transaction.
+    expect((await allX(dbB)).map((row) => row['x']), [99]);
+  });
 }

@@ -57,7 +57,6 @@ public:
                      bool continueOnError, EncodableList &results);
 
   void enterInTransaction();
-  void leaveTransaction();
   int currentTransactionID();
 
   using SqlCommandCallback = std::function<void()>;
