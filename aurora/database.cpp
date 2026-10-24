@@ -615,7 +615,14 @@ utils::error Database::bindStmtArgs(sqlite3_stmt *stmt,
       return utils::error(currentErrorMessage(), currentErrorCode());
   }
 
-  logger_.sql() << sqlite3_expanded_sql(stmt) << std::endl;
+  if (logger_.logLevel() >= Logger::Level::Sql) {
+    // The expanded SQL is allocated by SQLite and must be freed; also do
+    // not pay for the expansion at all when SQL logging is off.
+    const char *expanded = sqlite3_expanded_sql(stmt);
+    if (expanded != nullptr)
+      logger_.sql() << expanded << std::endl;
+    sqlite3_free(const_cast<void *>(static_cast<const void *>(expanded)));
+  }
   return utils::error::none();
 }
 
