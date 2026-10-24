@@ -143,7 +143,6 @@ utils::error Database::open(const std::string &password) {
   if (error)
     return error;
 
-  const auto pathExists = std::filesystem::exists(path_);
   int result_code =
       sqlite3_open_v2(path_.c_str(), &db_,
                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
@@ -163,29 +162,13 @@ utils::error Database::open(const std::string &password) {
     return utils::error::none();
   }
 
-  if (!pathExists) {
-    return validationError;
-  }
-
-  // An encrypted database can not be recovered by removing and
-  // recreating the file (a wrong password makes a valid file look
-  // corrupted, so the recovery path would destroy user data).
-  if (!password.empty()) {
-    close();
-    return validationError;
-  }
-
+  // Never remove an existing database file: for an encrypted database a
+  // missing or wrong key makes a perfectly valid file look corrupted,
+  // so "recovery" by removing and recreating the file would silently
+  // destroy user data. Opening an unreadable or unopenable file is an
+  // error; deleting a database is a separate, explicit action.
   close();
-  std::filesystem::remove(path_);
-
-  result_code =
-      sqlite3_open_v2(path_.c_str(), &db_,
-                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
-  if (result_code != SQLITE_OK)
-    return utils::error(currentErrorMessage(), currentErrorCode());
-
-  sqlite3_busy_timeout(db_, 1000);
-  return validateOpenDatabase();
+  return validationError;
 }
 
 utils::error Database::openReadOnly(const std::string &password) {
