@@ -332,16 +332,12 @@ utils::error Database::query(const std::string &sql, const EncodableList &args,
           row.emplace_back(v);
           break;
         }
-        case SQLITE_NULL: {
-          const char *columnDecltype = sqlite3_column_decltype(stmt, idx);
-
-          if (columnDecltype != NULL && std::string("BLOB") == columnDecltype)
-            row.emplace_back(std::vector<uint8_t>());
-          else
-            row.emplace_back(nullptr);
-
+        case SQLITE_NULL:
+          // NULL is NULL regardless of the declared column type (matching
+          // the upstream sqflite behavior); a BLOB column with a NULL value
+          // must come back as Dart null, not as an empty Uint8List.
+          row.emplace_back(nullptr);
           break;
-        }
         default:
           break;
         }
@@ -552,6 +548,15 @@ utils::error Database::bindStmtArgs(sqlite3_stmt *stmt,
                                     const EncodableList &args) {
   int result = SQLITE_OK;
 
+  // An empty vector's data() may be nullptr, and
+  // sqlite3_bind_blob(..., nullptr, 0) binds SQL NULL instead of a
+  // zero-length BLOB, so empty typed lists must go through zeroblob.
+  auto bindBlob = [stmt](int idx, const void *data, size_t size) -> int {
+    if (size == 0)
+      return sqlite3_bind_zeroblob(stmt, idx, 0);
+    return sqlite3_bind_blob(stmt, idx, data, size, SQLITE_TRANSIENT);
+  };
+
   for (size_t i = 0; i < args.size(); i++) {
     auto idx = i + 1;
     EncodableValue arg = args[i];
@@ -571,23 +576,15 @@ utils::error Database::bindStmtArgs(sqlite3_stmt *stmt,
       result = sqlite3_bind_text(stmt, idx, string.c_str(), string.size(),
                                  SQLITE_TRANSIENT);
     } else if (const auto val = arg.GetValue<std::vector<uint8_t>>()) {
-      result = sqlite3_bind_blob(stmt, idx, val->data(), val->size(),
-                                 SQLITE_TRANSIENT);
+      result = bindBlob(idx, val->data(), val->size());
     } else if (const auto val = arg.GetValue<std::vector<int32_t>>()) {
-      result =
-          sqlite3_bind_blob(stmt, idx, val->data(),
-                            val->size() * sizeof(int32_t), SQLITE_TRANSIENT);
+      result = bindBlob(idx, val->data(), val->size() * sizeof(int32_t));
     } else if (const auto val = arg.GetValue<std::vector<int64_t>>()) {
-      result =
-          sqlite3_bind_blob(stmt, idx, val->data(),
-                            val->size() * sizeof(int64_t), SQLITE_TRANSIENT);
+      result = bindBlob(idx, val->data(), val->size() * sizeof(int64_t));
     } else if (const auto val = arg.GetValue<std::vector<float>>()) {
-      result = sqlite3_bind_blob(stmt, idx, val->data(),
-                                 val->size() * sizeof(float), SQLITE_TRANSIENT);
+      result = bindBlob(idx, val->data(), val->size() * sizeof(float));
     } else if (const auto val = arg.GetValue<std::vector<double>>()) {
-      result =
-          sqlite3_bind_blob(stmt, idx, val->data(),
-                            val->size() * sizeof(double), SQLITE_TRANSIENT);
+      result = bindBlob(idx, val->data(), val->size() * sizeof(double));
     } else if (const auto val = arg.GetValue<EncodableList>()) {
       /* only bytes list is supported */
       std::vector<uint8_t> container;
@@ -605,8 +602,7 @@ utils::error Database::bindStmtArgs(sqlite3_stmt *stmt,
         container.push_back(static_cast<uint8_t>(*el));
       }
 
-      result = sqlite3_bind_blob(stmt, idx, container.data(), container.size(),
-                                 SQLITE_TRANSIENT);
+      result = bindBlob(idx, container.data(), container.size());
     } else {
       return utils::error("statement parameter has invalid type");
     }
@@ -667,17 +663,11 @@ utils::error Database::resultFromCursor(const Cursor &cursor,
           row.emplace_back(v);
           break;
         }
-        case SQLITE_NULL: {
-          const char *columnDecltype =
-              sqlite3_column_decltype(cursor.stmt, idx);
-
-          if (columnDecltype != NULL && std::string("BLOB") == columnDecltype)
-            row.emplace_back(std::vector<uint8_t>());
-          else
-            row.emplace_back(nullptr);
-
+        case SQLITE_NULL:
+          // NULL is NULL regardless of the declared column type; see the
+          // same case in query().
+          row.emplace_back(nullptr);
           break;
-        }
         default:
           break;
         }
