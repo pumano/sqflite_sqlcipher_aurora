@@ -266,14 +266,17 @@ void SqfliteSqlcipherAuroraPlugin::onExecuteCall(const MethodCall& call, std::un
 
   const auto dbID = args->GetValue<int>(Arguments::Id).value_or(-1);
   const auto sql = args->GetValue<std::string>(Arguments::Sql).value_or("");
+  // Three-valued: nullopt means "no change" (a regular statement inside a
+  // transaction does not carry the flag), true = BEGIN, false =
+  // COMMIT/ROLLBACK.
   const auto inTransactionChange =
-      args->GetValue<bool>(Arguments::InTransaction).value_or(false);
+      args->GetValue<bool>(Arguments::InTransaction);
   const auto sqlArgs = args->GetValue<EncodableList>(Arguments::SqlArguments).value_or(EncodableList());
   const auto transactionID =
       args->GetValue<std::int64_t>(Arguments::TransactionId).value_or(DatabaseTransaction::ID::None);
 
   const auto enteringTransaction =
-      inTransactionChange == true &&
+      inTransactionChange.has_value() && *inTransactionChange &&
       transactionID == DatabaseTransaction::ID::None;
 
   const auto db = databaseByID(dbID);
@@ -295,7 +298,10 @@ void SqfliteSqlcipherAuroraPlugin::onExecuteCall(const MethodCall& call, std::un
       }
       const auto error = db->execute(sql, sqlArgs);
       if (error) {
-        db->leaveTransaction();
+        // A failed statement does not end an open transaction (SQLite
+        // keeps it); a failed BEGIN leaves no transaction. Align the
+        // bookkeeping with the actual handle state.
+        db->resyncTransactionState();
         result->Error(Errors::Sqflite,
                       formatError(Errors::Internal, error.message()),
                       makeSqlErrorDetails(sql, sqlArgs));
@@ -306,7 +312,10 @@ void SqfliteSqlcipherAuroraPlugin::onExecuteCall(const MethodCall& call, std::un
             {Arguments::TransactionId, db->currentTransactionID()}});
         return;
       }
-      if (inTransactionChange == false) {
+      // Only an explicit "inTransaction: false" (COMMIT/ROLLBACK) ends the
+      // transaction; an absent flag means "no change", so a regular
+      // statement inside a transaction keeps the state.
+      if (inTransactionChange.has_value() && !*inTransactionChange) {
         db->leaveTransaction();
       }
       result->Success();

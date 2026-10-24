@@ -61,7 +61,16 @@ public:
   int currentTransactionID();
 
   using SqlCommandCallback = std::function<void()>;
+  struct PendingSqlCommand {
+    int transactionID;
+    SqlCommandCallback callback;
+  };
   void processSqlCommand(int transactionID, const SqlCommandCallback &callback);
+  void drainPendingSqlCallbacks();
+  // Align the transaction bookkeeping with the actual state of the SQLite
+  // handle (sqlite3_get_autocommit): if the handle is not in a transaction,
+  // the bookkeeping must not claim one either.
+  void resyncTransactionState();
 
   bool isOpen() const;
   bool isSingleInstance() const;
@@ -90,7 +99,7 @@ public:
   Logger logger_;
   int transactionID_;
   int currentTransactionID_;
-  std::queue<SqlCommandCallback> pendingSqlCallbacks_;
+  std::queue<PendingSqlCommand> pendingSqlCallbacks_;
   int64_t cursorID_;
   std::unordered_map<int64_t, Cursor> cursors_;
   sqlite3 *db_;
