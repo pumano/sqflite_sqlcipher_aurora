@@ -17,10 +17,29 @@ set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wno-psabi")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 
 # SQLCipher is a drop-in replacement for SQLite: it provides the same
-# C API (sqlite3.h) and the same sqlite3_* symbols, so the plugin links
-# against the sqlcipher package (provided by conan, see conanfile.py).
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SQLCIPHER REQUIRED IMPORTED_TARGET sqlcipher)
+# C API (sqlite3.h, vendored in include/) and the same sqlite3_* symbols,
+# so the plugin simply links against the prebuilt libsqlcipher.so.0.
+#
+# The prebuilt libraries in prebuilt/<arch>/ were built from the official
+# sqlcipher 4.6.1 sources (see prebuilt/BUILD.md) against the system
+# OpenSSL 1.1.1w, which is part of the Aurora OS base system
+# (libssl.so.1.1 / libcrypto.so.1.1), so nothing else needs to be
+# bundled or installed.
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "armv7l" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "armv7hl")
+    set(_SQLCIPHER_ARCH armv7)
+elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+    set(_SQLCIPHER_ARCH aarch64)
+elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+    set(_SQLCIPHER_ARCH x86_64)
+else()
+    message(FATAL_ERROR "Unsupported CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
+add_library(sqlcipher_prebuilt SHARED IMPORTED)
+set_target_properties(sqlcipher_prebuilt PROPERTIES
+    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/prebuilt/${_SQLCIPHER_ARCH}/libsqlcipher.so.0
+    INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 
 set(SOURCES
     async_queue.cpp
@@ -43,21 +62,30 @@ ADD_CLIENT_WRAPPER_SOURCE(${PLUGIN_NAME})
 
 set_target_properties(${PLUGIN_NAME} PROPERTIES
     CXX_VISIBILITY_PRESET hidden
-    # The plugin is loaded from <bundle>/lib at runtime together with
-    # the conan-deployed SQLCipher/OpenSSL libraries, so it must find
-    # them relative to its own location.
+    # The plugin is loaded from <bundle>/lib at runtime, and
+    # libsqlcipher.so.0 is copied there as well, so it must find the
+    # library relative to its own location.
     BUILD_RPATH "\$ORIGIN"
     INSTALL_RPATH "\$ORIGIN"
 )
 
 # PUBLIC (not PRIVATE): the application executable links this plugin as a
-# CMake target (flutter's generated_plugins.cmake), so the SQLCipher
-# libraries must propagate to the executable's link line for the linker
-# to resolve the plugin's DT_NEEDED entries (libsqlcipher, libssl,
-# libcrypto, libz). At runtime the conan-deploy-libraries script copies
-# these libraries next to the plugin, which is covered by the $ORIGIN
-# rpath set above.
-target_link_libraries(${PLUGIN_NAME} PUBLIC PkgConfig::SQLCIPHER)
+# CMake target (flutter's generated_plugins.cmake), so libsqlcipher must
+# propagate to the executable's link line for the linker to resolve the
+# plugin's DT_NEEDED entry (libsqlcipher.so.0). At runtime the library is
+# found next to the plugin via the $ORIGIN rpath set above.
+target_link_libraries(${PLUGIN_NAME} PUBLIC sqlcipher_prebuilt)
 
 target_include_directories(${PLUGIN_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_definitions(${PLUGIN_NAME} PRIVATE PLUGIN_IMPL)
+
+# Ship libsqlcipher.so.0 in the application bundle next to the plugin,
+# so the $ORIGIN rpath resolves it at runtime.
+if(DEFINED ROOT_PROJECT_BINARY_DIR)
+    add_custom_command(TARGET ${PLUGIN_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/prebuilt/${_SQLCIPHER_ARCH}/libsqlcipher.so.0
+            ${ROOT_PROJECT_BINARY_DIR}/bundle/lib/
+        COMMENT "Copying libsqlcipher.so.0 to the application bundle"
+    )
+endif()

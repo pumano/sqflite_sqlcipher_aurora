@@ -16,7 +16,7 @@ your app
   └── sqflite_sqlcipher          (Dart API: openDatabase(password: …))
         ├── sqflite_common       (shared, platform-agnostic Dart logic)
         └── [aurora] sqflite_sqlcipher_aurora   ← this package
-                └── C++ (libsqlcipher via conan)
+                └── C++ (libsqlcipher, prebuilt in aurora/prebuilt/)
 ```
 
 `sqflite_sqlcipher` declares `aurora: default_package: sqflite_sqlcipher_aurora`
@@ -27,10 +27,11 @@ plugin; only the Aurora (Linux) native layer is provided here.
 ## Requirements
 
 - Aurora OS (Linux) with the `flutter-aurora` SDK.
-- The native build pulls **SQLCipher** from the Aurora conan repository
-  (`sqlcipher/4.6.1@aurora`), together with its OpenSSL dependency, and bundles
-  the shared libraries next to the plugin (`$ORIGIN` rpath). No manual SQLCipher
-  setup is required.
+- No extra dependencies: the plugin vendors prebuilt `libsqlcipher.so.0`
+  (SQLCipher 4.6.1, SQLite 3.46.1) for aarch64/armv7/x86_64 in
+  `aurora/prebuilt/`, built against the system OpenSSL 1.1.1w that ships
+  with Aurora OS. Nothing to install, no conan, nothing to configure —
+  just add `sqflite_sqlcipher` to `pubspec.yaml` and build.
 
 ## Usage
 
@@ -65,8 +66,10 @@ From the `example/` directory:
 flutter build aurora --target-platform aurora-arm64   # or aurora-arm
 ```
 
-The example's `aurora/conanfile.py` + `aurora/rpm/*` (spec, `load-conan.sh`,
-`version.config`) wire SQLCipher into the RPM build via conan.
+The RPM build needs no extra configuration: CMake picks the matching
+`aurora/prebuilt/<arch>/libsqlcipher.so.0` for the target architecture and
+the spec bundles it with the app. See `aurora/prebuilt/BUILD.md` for how the
+prebuilt libraries are produced.
 
 ## License
 
