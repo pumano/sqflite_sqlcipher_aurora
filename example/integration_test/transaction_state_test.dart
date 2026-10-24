@@ -209,4 +209,40 @@ void main() {
             .first['n'],
         1);
   });
+
+  test('failed ROLLBACK TO keeps the outer transaction atomic', () async {
+    final db = await sqlcipher.openDatabase(dbPath,
+        password: password, singleInstance: true);
+    await db.execute('CREATE TABLE t(v TEXT)');
+    try {
+      await db.transaction((txn) async {
+        await txn.insert('t', {'v': 'before'});
+        try {
+          await txn.execute('ROLLBACK TO missing_savepoint');
+        } on sqlcipher.DatabaseException {
+          // SQLite leaves the outer transaction open.
+        }
+        await txn.insert('t', {'v': 'after'});
+        throw StateError('Roll back the outer transaction');
+      });
+    } catch (_) {
+      // The transaction failed: neither row may have been committed.
+    }
+    expect(await db.query('t'), isEmpty);
+  });
+
+  test('successful ROLLBACK TO keeps the transaction open', () async {
+    final db = await sqlcipher.openDatabase(dbPath,
+        password: password, singleInstance: true);
+    await db.execute('CREATE TABLE t(v TEXT)');
+    await db.transaction((txn) async {
+      await txn.insert('t', {'v': 'kept'});
+      await txn.execute('SAVEPOINT sp');
+      await txn.insert('t', {'v': 'discarded'});
+      await txn.execute('ROLLBACK TO sp');
+      await txn.insert('t', {'v': 'after'});
+    });
+    final rows = await db.query('t', columns: ['v']);
+    expect(rows.map((r) => r['v']), ['kept', 'after']);
+  });
 }

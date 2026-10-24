@@ -1,5 +1,7 @@
 #include <sqflite_sqlcipher_aurora/plugin.h>
 
+#include <cctype>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -9,6 +11,42 @@
 #include <client_wrapper/plugin_registrar.h>
 
 #include "src/sqflite_sqlcipher_aurora_plugin.h"
+
+// True if `sql` is a `ROLLBACK TO [SAVEPOINT] ...` statement.
+//
+// sqflite_common derives the `inTransaction` argument from the statement
+// text (`startsWith('rollback')`), so both a plain `ROLLBACK` and
+// `ROLLBACK TO savepoint` arrive with `inTransaction: false`. Only the
+// former ends the surrounding transaction; the latter must keep it, or a
+// transaction the client still considers open would silently turn into
+// autocommit.
+static bool isRollbackToSavepoint(const std::string& sql) {
+  auto startsWithWord = [](const std::string& s, size_t pos, const char* word) {
+    const size_t n = std::strlen(word);
+    if (pos > s.size() || s.size() - pos < n) {
+      return false;
+    }
+    for (size_t k = 0; k < n; ++k) {
+      if (std::toupper(static_cast<unsigned char>(s[pos + k])) != word[k]) {
+        return false;
+      }
+    }
+    const size_t end = pos + n;
+    return end == s.size() || !std::isalnum(static_cast<unsigned char>(s[end]));
+  };
+  size_t i = 0;
+  while (i < sql.size() && std::isspace(static_cast<unsigned char>(sql[i]))) {
+    ++i;
+  }
+  if (!startsWithWord(sql, i, "ROLLBACK")) {
+    return false;
+  }
+  size_t j = i + std::strlen("ROLLBACK");
+  while (j < sql.size() && std::isspace(static_cast<unsigned char>(sql[j]))) {
+    ++j;
+  }
+  return startsWithWord(sql, j, "TO");
+}
 
 SqfliteSqlcipherAuroraPlugin::SqfliteSqlcipherAuroraPlugin(cw::PluginRegistrar* registrar)
     : cw::BasicPlugin<>(Channels::Methods, registrar->messenger())
@@ -298,19 +336,23 @@ void SqfliteSqlcipherAuroraPlugin::onExecuteCall(const MethodCall& call, std::un
       }
       const auto error = db->execute(sql, sqlArgs);
       if (error) {
-        if (inTransactionChange.has_value() && !*inTransactionChange) {
-          // A failed COMMIT/ROLLBACK: the Dart client (sqflite_common)
-          // marks the transaction closed in a `finally` even when this
-          // statement fails and will never reference this id again. If the
-          // handle is still inside the transaction (e.g. a deferred
-          // constraint rejected the COMMIT), roll it back natively and clear
-          // the bookkeeping; keeping the id would leave every subsequent
-          // non-transactional command queued behind it forever.
+        if (inTransactionChange.has_value() && !*inTransactionChange &&
+            !isRollbackToSavepoint(sql)) {
+          // A failed COMMIT (or a plain ROLLBACK): the Dart client
+          // (sqflite_common) marks the transaction closed in a `finally`
+          // even when this statement fails and will never reference this id
+          // again. If the handle is still inside the transaction (e.g. a
+          // deferred constraint rejected the COMMIT), roll it back natively
+          // and clear the bookkeeping; keeping the id would leave every
+          // subsequent non-transactional command queued behind it forever.
           db->abortTransaction();
         } else {
           // A failed statement does not end an open transaction (SQLite
-          // keeps it); a failed BEGIN leaves no transaction. Align the
-          // bookkeeping with the actual handle state.
+          // keeps it) — including a failed `ROLLBACK TO savepoint`, which
+          // the client flags `inTransaction: false` but which leaves the
+          // transaction the client still considers open intact. A failed
+          // BEGIN leaves no transaction. Align the bookkeeping with the
+          // actual handle state.
           db->resyncTransactionState();
         }
         result->Error(Errors::Sqflite,
@@ -323,10 +365,14 @@ void SqfliteSqlcipherAuroraPlugin::onExecuteCall(const MethodCall& call, std::un
             {Arguments::TransactionId, db->currentTransactionID()}});
         return;
       }
-      // Only an explicit "inTransaction: false" (COMMIT/ROLLBACK) ends the
-      // transaction; an absent flag means "no change", so a regular
-      // statement inside a transaction keeps the state.
-      if (inTransactionChange.has_value() && !*inTransactionChange) {
+      // Only an explicit "inTransaction: false" on a statement that truly
+      // ends the transaction (COMMIT / plain ROLLBACK) clears the id; a
+      // `ROLLBACK TO savepoint` is also flagged `inTransaction: false` by
+      // the client (the flag is derived from the statement text) but keeps
+      // the transaction open. An absent flag means "no change", so a
+      // regular statement inside a transaction keeps the state.
+      if (inTransactionChange.has_value() && !*inTransactionChange &&
+          !isRollbackToSavepoint(sql)) {
         db->leaveTransaction();
       }
       result->Success();
