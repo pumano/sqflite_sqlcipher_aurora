@@ -12,7 +12,10 @@
 
 #include "src/sqflite_sqlcipher_aurora_plugin.h"
 
-// True if `sql` is a `ROLLBACK TO [SAVEPOINT] ...` statement.
+// True if `sql` is a `ROLLBACK TO [SAVEPOINT] ...` statement, in any of its
+// forms: `ROLLBACK TO sp`, `ROLLBACK TRANSACTION TO sp`,
+// `ROLLBACK TRANSACTION TO SAVEPOINT sp`, with SQL comments between the
+// keywords.
 //
 // sqflite_common derives the `inTransaction` argument from the statement
 // text (`startsWith('rollback')`), so both a plain `ROLLBACK` and
@@ -21,7 +24,27 @@
 // transaction the client still considers open would silently turn into
 // autocommit.
 static bool isRollbackToSavepoint(const std::string& sql) {
-  auto startsWithWord = [](const std::string& s, size_t pos, const char* word) {
+  // Skips whitespace and SQL comments (`/* ... */` and `-- ...`), returning
+  // the index of the next token.
+  const auto skip = [&sql](size_t pos) {
+    while (pos < sql.size()) {
+      const auto c = static_cast<unsigned char>(sql[pos]);
+      if (std::isspace(c)) {
+        ++pos;
+      } else if (c == '/' && pos + 1 < sql.size() && sql[pos + 1] == '*') {
+        const auto end = sql.find("*/", pos + 2);
+        pos = (end == std::string::npos) ? sql.size() : end + 2;
+      } else if (c == '-' && pos + 1 < sql.size() && sql[pos + 1] == '-') {
+        const auto end = sql.find('\n', pos);
+        pos = (end == std::string::npos) ? sql.size() : end + 1;
+      } else {
+        break;
+      }
+    }
+    return pos;
+  };
+  // True if a whole (case-insensitive) word `word` starts at `pos`.
+  const auto isWord = [](const std::string& s, size_t pos, const char* word) {
     const size_t n = std::strlen(word);
     if (pos > s.size() || s.size() - pos < n) {
       return false;
@@ -34,18 +57,18 @@ static bool isRollbackToSavepoint(const std::string& sql) {
     const size_t end = pos + n;
     return end == s.size() || !std::isalnum(static_cast<unsigned char>(s[end]));
   };
-  size_t i = 0;
-  while (i < sql.size() && std::isspace(static_cast<unsigned char>(sql[i]))) {
-    ++i;
-  }
-  if (!startsWithWord(sql, i, "ROLLBACK")) {
+  size_t i = skip(0);
+  if (!isWord(sql, i, "ROLLBACK")) {
     return false;
   }
-  size_t j = i + std::strlen("ROLLBACK");
-  while (j < sql.size() && std::isspace(static_cast<unsigned char>(sql[j]))) {
-    ++j;
+  i = skip(i + std::strlen("ROLLBACK"));
+  // `TRANSACTION` is optional and does not change the meaning: both
+  // `ROLLBACK TO ...` and `ROLLBACK TRANSACTION TO ...` roll back to a
+  // savepoint only and keep the surrounding transaction open.
+  if (isWord(sql, i, "TRANSACTION")) {
+    i = skip(i + std::strlen("TRANSACTION"));
   }
-  return startsWithWord(sql, j, "TO");
+  return isWord(sql, i, "TO");
 }
 
 SqfliteSqlcipherAuroraPlugin::SqfliteSqlcipherAuroraPlugin(cw::PluginRegistrar* registrar)
@@ -365,15 +388,18 @@ void SqfliteSqlcipherAuroraPlugin::onExecuteCall(const MethodCall& call, std::un
             {Arguments::TransactionId, db->currentTransactionID()}});
         return;
       }
-      // Only an explicit "inTransaction: false" on a statement that truly
-      // ends the transaction (COMMIT / plain ROLLBACK) clears the id; a
-      // `ROLLBACK TO savepoint` is also flagged `inTransaction: false` by
-      // the client (the flag is derived from the statement text) but keeps
-      // the transaction open. An absent flag means "no change", so a
-      // regular statement inside a transaction keeps the state.
-      if (inTransactionChange.has_value() && !*inTransactionChange &&
-          !isRollbackToSavepoint(sql)) {
-        db->leaveTransaction();
+      // An explicit "inTransaction: false" means the statement is expected
+      // to end the transaction (COMMIT / plain ROLLBACK). Sync with the
+      // actual handle state instead of assuming it did: a `ROLLBACK TO
+      // savepoint` is also flagged `inTransaction: false` by the client
+      // (the flag is derived from the statement text) but keeps the
+      // transaction open, and so would any statement form the parser above
+      // does not recognize. If the handle is still inside a transaction the
+      // id is kept (a queued foreign command must not run inside it); an
+      // absent flag means "no change", so a regular statement inside a
+      // transaction keeps the state.
+      if (inTransactionChange.has_value() && !*inTransactionChange) {
+        db->resyncTransactionState();
       }
       result->Success();
     });
