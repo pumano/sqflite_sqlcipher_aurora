@@ -456,7 +456,9 @@ void SqfliteSqlcipherAuroraPlugin::onInsertCall(const MethodCall& call, std::uni
 
   asyncQueue_.push([this, db, sql, sqlArgs, transactionID, result = std::shared_ptr<MethodResult>(std::move(result))] {
     db->processSqlCommand(transactionID, [this, db, sql, sqlArgs, result] {
-      int insertID = 0;
+      // 64-bit: rowids above 2^31-1 (e.g. 4294967297) must survive the
+      // round trip, so the value is sent as int64, not int32.
+      int64_t insertID = 0;
       const auto error = db->insert(sql, sqlArgs, insertID);
       if (error) {
         result->Error(Errors::Sqflite,

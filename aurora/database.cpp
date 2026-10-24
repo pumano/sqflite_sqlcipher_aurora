@@ -397,7 +397,7 @@ utils::error Database::queryCursorNext(int cursorID, bool cancel,
 }
 
 utils::error Database::insert(const std::string &sql, const EncodableList &args,
-                              int &insertID) {
+                              int64_t &insertID) {
   if (isReadOnly_)
     return utils::error("database is readonly");
 
@@ -696,7 +696,7 @@ utils::error Database::batch(const std::vector<Operation> &operations,
     const auto &method = operation.method;
 
     if (method == Methods::Insert) {
-      int insertID = 0;
+      int64_t insertID = 0;
       const auto error = insert(operation.sql, operation.arguments, insertID);
 
       if (error) {
