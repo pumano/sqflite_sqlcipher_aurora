@@ -238,13 +238,33 @@ utils::error Database::close() {
     return utils::error(currentErrorMessage(), currentErrorCode());
 
   db_ = nullptr;
-  pendingSqlCallbacks_ = {};
+
+  // Reset the transaction state: a command that reaches
+  // processSqlCommand() only after this close must not see the stale
+  // transaction id and queue itself behind a transaction that no longer
+  // exists - nobody would ever run it, and its Dart future would hang.
+  transactionID_ = 0;
+  currentTransactionID_ = DatabaseTransaction::ID::None;
+
+  // Complete the still-queued commands with an error instead of dropping
+  // them: each callback drives a Dart future, and silently destroying it
+  // would leave that future pending forever. With db_ now null, the SQL
+  // methods return a "database closed" error, so every queued command
+  // resolves (with that error) rather than hanging.
+  while (!pendingSqlCallbacks_.empty()) {
+    const auto command = pendingSqlCallbacks_.front();
+    pendingSqlCallbacks_.pop();
+    command.callback();
+  }
 
   return utils::error::none();
 }
 
 utils::error Database::execute(const std::string &sql,
                                const EncodableList &args) {
+  if (!db_)
+    return utils::error("database closed");
+
   const char *sqlPtr = sql.c_str();
   const char *tail = nullptr;
   bool argsBound = false;
@@ -296,6 +316,9 @@ utils::error Database::execute(const std::string &sql,
 
 utils::error Database::query(const std::string &sql, const EncodableList &args,
                              EncodableMap &result) {
+  if (!db_)
+    return utils::error("database closed");
+
   sqlite3_stmt *stmt = nullptr;
 
   if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
@@ -371,6 +394,9 @@ utils::error Database::queryWithPageSize(const std::string &sql,
                                          const EncodableList &args,
                                          int64_t pageSize,
                                          EncodableMap &result) {
+  if (!db_)
+    return utils::error("database closed");
+
   sqlite3_stmt *stmt = nullptr;
 
   if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
@@ -391,6 +417,9 @@ utils::error Database::queryWithPageSize(const std::string &sql,
 
 utils::error Database::queryCursorNext(int cursorID, bool cancel,
                                        EncodableMap &result) {
+  if (!db_)
+    return utils::error("database closed");
+
   logger_.verb() << "querying cursor next (ID=" << cursorID
                   << "; CANCEL=" << cancel << ")" << std::endl;
 
@@ -409,6 +438,8 @@ utils::error Database::queryCursorNext(int cursorID, bool cancel,
 
 utils::error Database::insert(const std::string &sql, const EncodableList &args,
                               int64_t &insertID) {
+  if (!db_)
+    return utils::error("database closed");
   if (isReadOnly_)
     return utils::error("database is readonly");
 
@@ -438,6 +469,8 @@ utils::error Database::insert(const std::string &sql, const EncodableList &args,
 
 utils::error Database::update(const std::string &sql, const EncodableList &args,
                               int &updated) {
+  if (!db_)
+    return utils::error("database closed");
   if (isReadOnly_)
     return utils::error("database is readonly");
 
@@ -454,6 +487,15 @@ utils::error Database::update(const std::string &sql, const EncodableList &args,
 
 void Database::processSqlCommand(int transactionID,
                                  const SqlCommandCallback &callback) {
+  if (!db_) {
+    // The database was closed after this command was queued: run the
+    // callback anyway so its Dart future resolves (the SQL method returns
+    // a "database closed" error) instead of queueing it behind a
+    // transaction that will never end.
+    callback();
+    return;
+  }
+
   if (currentTransactionID_.load() == DatabaseTransaction::ID::None) {
     callback();
     return;
@@ -739,6 +781,9 @@ utils::error Database::resultFromCursor(const Cursor &cursor,
 
 utils::error Database::batch(const std::vector<Operation> &operations,
                              bool continueOnError, EncodableList &results) {
+  if (!db_)
+    return utils::error("database closed");
+
   for (const auto &operation : operations) {
     const auto &method = operation.method;
 
