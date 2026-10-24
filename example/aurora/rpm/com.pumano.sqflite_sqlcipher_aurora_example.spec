@@ -1,7 +1,7 @@
 %include %{_sourcedir}/defines.inc
 
 %global __provides_exclude_from ^%{_datadir}/%{name}/lib/.*$
-%global __requires_exclude ^libsqlcipher\.so.*$
+%global __requires_exclude %{_flutter_excludes}
 
 %define _cmake_skip_rpath %{nil}
 

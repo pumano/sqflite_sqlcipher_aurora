@@ -38,6 +38,11 @@ flutter:
       aurora:
         pluginEntryPointHeader: plugin.h
         pluginEntryPoint: SqfliteSqlcipherAuroraPluginRegister
+        # The bundled libsqlcipher.so.0 ships inside the application; keep it
+        # out of the automatically computed RPM Requires so that consuming
+        # apps do not depend on an external SQLCipher package.
+        requiresExclude:
+          - sqlcipher
 
 
   # To add assets to your plugin package, add an assets section, like this:
