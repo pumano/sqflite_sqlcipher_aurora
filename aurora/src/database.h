@@ -50,7 +50,7 @@ public:
                                  const EncodableList &args, int64_t pageSize,
                                  EncodableMap &result);
   utils::error insert(const std::string &sql, const EncodableList &args,
-                      int &insertID);
+                      int64_t &insertID);
   utils::error update(const std::string &sql, const EncodableList &args,
                       int &updated);
   utils::error batch(const std::vector<Operation> &operations,
