@@ -42,7 +42,8 @@ would take. It is not needed for real apps.
 - No extra runtime dependencies: the plugin vendors prebuilt `libsqlcipher.so.0`
   (SQLCipher 4.6.1, SQLite 3.46.1) for aarch64/armv7/x86_64 in
   `aurora/prebuilt/`, built against the system OpenSSL 1.1.1w that ships
-  with Aurora OS. Nothing to install, no conan, nothing to configure.
+  with Aurora OS. The `armv7` variant is hard-float, matching the
+  `armv7hl` target. Nothing to install, no conan, nothing to configure.
 
 ## Usage
 
@@ -73,6 +74,11 @@ Future<Database> open() async {
 ```
 
 Omitting `password` gives a plain (unencrypted) SQLite database.
+
+Opening an **existing encrypted** database requires its password: with a
+missing or wrong `password` the open fails with an error and the file is
+left untouched — it is never deleted or re-created. Catch the error and
+prompt the user for a password, then open again.
 
 ## Integrating an existing app
 
@@ -117,8 +123,10 @@ flutter-aurora build aurora --target-platform aurora-arm64   # or aurora-arm
 
 The RPM build needs no extra configuration: CMake picks the matching
 `aurora/prebuilt/<arch>/libsqlcipher.so.0` for the target architecture and
-the spec bundles it with the app. See `aurora/prebuilt/BUILD.md` for how the
-prebuilt libraries are produced.
+the spec bundles it with the app. The bundled library is also excluded from
+the auto-detected RPM `Requires` (`requiresExclude` in `pubspec.yaml`), so
+the standard generated spec installs without manual tweaks. See
+`aurora/prebuilt/BUILD.md` for how the prebuilt libraries are produced.
 
 ## License
 
