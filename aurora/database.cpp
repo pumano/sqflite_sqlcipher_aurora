@@ -457,17 +457,47 @@ void Database::processSqlCommand(int transactionID,
     callback();
 
     if (currentTransactionID_ == DatabaseTransaction::ID::None) {
-      while (!pendingSqlCallbacks_.empty() && isOpen()) {
-        const auto &pendingCallback = pendingSqlCallbacks_.front();
-        pendingCallback();
-        pendingSqlCallbacks_.pop();
-      }
+      drainPendingSqlCallbacks();
     }
 
     return;
   }
 
-  pendingSqlCallbacks_.push(callback);
+  pendingSqlCallbacks_.emplace(PendingSqlCommand{transactionID, callback});
+}
+
+// Runs the queued commands in arrival order while they are allowed to run:
+// when no transaction is active, or when the command belongs to the active
+// transaction (or is forced). Stops at the first command that belongs to a
+// different transaction, so that a command is never executed inside a
+// transaction it does not belong to. Such a command is picked up when its
+// transaction (re)becomes the current one.
+void Database::drainPendingSqlCallbacks() {
+  while (!pendingSqlCallbacks_.empty() && isOpen()) {
+    const auto &front = pendingSqlCallbacks_.front();
+    if (currentTransactionID_ != DatabaseTransaction::ID::None &&
+        front.transactionID != currentTransactionID_ &&
+        front.transactionID != DatabaseTransaction::ID::Force) {
+      break;
+    }
+    const auto command = front;
+    pendingSqlCallbacks_.pop();
+    command.callback();
+  }
+}
+
+void Database::resyncTransactionState() {
+  if (!db_) {
+    currentTransactionID_ = DatabaseTransaction::ID::None;
+    return;
+  }
+  // sqlite3_get_autocommit() is 1 when no transaction is active and 0
+  // inside one. If the handle is not in a transaction, the bookkeeping
+  // must not claim one either; if it is, the bookkeeping is left as is
+  // (the transaction id is only known to the client that started it).
+  if (sqlite3_get_autocommit(db_) != 0) {
+    currentTransactionID_ = DatabaseTransaction::ID::None;
+  }
 }
 
 void Database::enterInTransaction() {
