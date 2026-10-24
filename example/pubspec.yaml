@@ -19,19 +19,20 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # The API (fork with aurora platform entry -> sqflite_sqlcipher_aurora)
-  sqflite_sqlcipher:
-    path: ../../sqflite_sqlcipher/sqflite
+  # The API: the published `sqflite_sqlcipher` package. Its Dart side is
+  # self-contained and talks to the `com.davidmartos96.sqflite_sqlcipher`
+  # method channel directly.
+  sqflite_sqlcipher: 3.4.1
+
+  # The Aurora platform implementation: our native plugin. The published
+  # `sqflite_sqlcipher` has no Aurora platform entry, so the example depends
+  # on the plugin directly to make the tooling build and register it.
+  sqflite_sqlcipher_aurora:
+    path: ../
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
-
-# Point the aurora platform implementation at our local plugin (the fork's
-# `aurora: default_package: sqflite_sqlcipher_aurora` resolves here).
-dependency_overrides:
-  sqflite_sqlcipher_aurora:
-    path: ../
 
 dev_dependencies:
   integration_test:
