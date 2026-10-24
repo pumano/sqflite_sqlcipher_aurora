@@ -71,6 +71,12 @@ public:
   // handle (sqlite3_get_autocommit): if the handle is not in a transaction,
   // the bookkeeping must not claim one either.
   void resyncTransactionState();
+  // End the transaction if the handle is still inside one (best-effort
+  // ROLLBACK) and clear the bookkeeping. Used after a failed COMMIT/
+  // ROLLBACK: the Dart client marks the transaction closed and will never
+  // reference this id again, so keeping it would block the queued
+  // non-transactional commands forever.
+  void abortTransaction();
 
   bool isOpen() const;
   bool isSingleInstance() const;
