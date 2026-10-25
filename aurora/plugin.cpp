@@ -309,9 +309,42 @@ void SqfliteSqlcipherAuroraPlugin::onDeleteDatabaseCall(const MethodCall& call, 
       databaseRemove(db);
     }
 
-    if (std::filesystem::exists(dbPath)) {
-      logger_.verb() << "delete not opened database " << dbPath << std::endl;
-      std::filesystem::remove(dbPath);
+    // Delete the database file and every sidecar. A clean close normally
+    // merges the WAL and removes -wal/-shm, but a crash or unclean close (or
+    // a rollback journal) can leave them behind; deleteDatabase must leave no
+    // trace. The non-throwing overloads (std::error_code) are used so that a
+    // filesystem failure (e.g. a sidecar path that is a directory, or a
+    // directory without write permission) becomes a reported error instead of
+    // an exception lost in the async queue, which would hang the Dart Future.
+    auto removeFile = [this, result](const std::filesystem::path& path,
+                                     const char* what) {
+      std::error_code ec;
+      if (!std::filesystem::exists(path, ec)) {
+        if (ec) {
+          result->Error(Errors::Internal, formatError(Errors::Internal, path.string(),
+                                                      "failed to check for the file: " +
+                                                          ec.message()));
+        }
+        // A missing file is the success case: nothing to delete.
+        return !ec;
+      }
+
+      logger_.verb() << "delete " << what << " " << path << std::endl;
+      if (!std::filesystem::remove(path, ec) || ec) {
+        result->Error(Errors::Internal,
+                      formatError(Errors::Internal, path.string(),
+                                  std::string("failed to remove the ") + what + ": " +
+                                              ec.message()));
+        return false;
+      }
+      return true;
+    };
+
+    if (!removeFile(dbPath, "the database file") ||
+        !removeFile(dbPath + "-journal", "the journal file") ||
+        !removeFile(dbPath + "-wal", "the WAL file") ||
+        !removeFile(dbPath + "-shm", "the SHM file")) {
+      return;  // The error has already been reported.
     }
 
     result->Success();
