@@ -5,11 +5,21 @@
 #include "src/constants.h"
 #include "src/database.h"
 
+#include <cstddef>
 #include <filesystem>
 #include <limits>
 #include <sstream>
 
 namespace {
+
+// Overwrite a buffer in a way the compiler cannot elide (secure wipe, the
+// portable equivalent of explicit_bzero).
+void secureWipe(void *data, std::size_t size) {
+  volatile char *p = static_cast<volatile char *>(data);
+  while (size-- > 0) {
+    *p++ = 0;
+  }
+}
 
 void addError(Database::EncodableList &results, const utils::error &error,
               const std::string &sql, const Database::EncodableList &arguments) {
@@ -126,23 +136,17 @@ utils::error Database::setKey(const std::string &password) {
     return utils::error::none();
   }
 
-  // Escape single quotes and pass the key as a quoted literal.
-  std::string sql;
-  sql.reserve(password.size() * 2 + 16);
-  sql += "PRAGMA key = '";
-  for (const char c : password) {
-    sql += c;
-    if (c == '\'') {
-      sql += '\'';
-    }
-  }
-  sql += '\'';
-
-  char *errmsg = nullptr;
-  const int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &errmsg);
+  // Apply the key via sqlite3_key on a private buffer rather than a
+  // `PRAGMA key = '...'` string: the key never lands in a SQL string (so it
+  // cannot be logged or need escaping), and NUL bytes in the key are preserved
+  // (a C-string pragma would truncate at the first NUL). The buffer is wiped
+  // afterwards so the key bytes do not linger in memory.
+  std::string key(password);
+  const int rc = sqlite3_key_v2(db_, "main", key.data(),
+                                static_cast<int>(key.size()));
+  secureWipe(key.data(), key.size());
   if (rc != SQLITE_OK) {
-    const auto message = errmsg ? errmsg : sqlite3_errmsg(db_);
-    return utils::error(message, rc);
+    return utils::error(sqlite3_errmsg(db_), rc);
   }
   return utils::error::none();
 }
