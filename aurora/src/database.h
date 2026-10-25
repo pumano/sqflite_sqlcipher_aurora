@@ -6,6 +6,7 @@
 
 #include <client_wrapper/encodable_value.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <queue>
@@ -102,10 +103,19 @@ public:
   bool isSingleInstance_;
   bool isReadOnly_;
   Logger logger_;
+  // Worker-only: monotonically grows in enterInTransaction(), never read
+  // off the worker thread.
   int transactionID_;
-  int currentTransactionID_;
+  // Atomic: written by the worker (enter/abort/resync) and read from the
+  // channel thread by isInTransaction() (single-instance re-open check).
+  std::atomic<int> currentTransactionID_{DatabaseTransaction::ID::None};
   std::queue<PendingSqlCommand> pendingSqlCallbacks_;
   int64_t cursorID_;
   std::unordered_map<int64_t, Cursor> cursors_;
   sqlite3 *db_;
+  // Mirrors (db_ != nullptr) but is atomic: isOpen() is called from the
+  // channel thread (single-instance re-open check) while open()/close()
+  // mutate db_ on the async worker thread. Reading the raw pointer from two
+  // threads is a data race; the flag is not.
+  std::atomic<bool> open_{false};
 };
