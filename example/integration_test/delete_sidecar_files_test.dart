@@ -93,4 +93,36 @@ void main() {
     File('${walDir.path}/entry').deleteSync();
     walDir.deleteSync();
   });
+
+  testWidgets('an unremovable database path yields a controlled error, not a hang or a false success',
+      (tester) async {
+    // The main database path exists as a non-empty directory:
+    // std::filesystem::remove fails on it (ENOTEMPTY). The call must
+    // complete with an error and leave the directory intact; it must not
+    // hang (a swallowed native exception used to) nor report a false
+    // success (the pre-fix behaviour).
+    final dbDir = Directory(dbPath);
+    dbDir.createSync();
+    File('${dbDir.path}/entry').writeAsStringSync('leftover');
+
+    Object? outcome;
+    try {
+      await sqlcipher.deleteDatabase(dbPath)
+          .timeout(const Duration(seconds: 5));
+    } on TimeoutException {
+      fail('deleteDatabase lost its response for an unremovable path');
+    } catch (error) {
+      outcome = error;
+    }
+
+    expect(outcome, isNotNull,
+        reason: 'deleteDatabase must fail for a non-empty directory path, '
+            'a success would be a lie');
+    expect(dbDir.existsSync(), isTrue,
+        reason: 'the unremovable directory must be left intact');
+
+    // Clean up so the tearDown / next runs are not affected.
+    File('${dbDir.path}/entry').deleteSync();
+    dbDir.deleteSync();
+  });
 }
