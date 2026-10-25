@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <limits>
 #include <sstream>
+#include <system_error>
 
 namespace {
 
@@ -603,13 +604,19 @@ utils::error Database::createParentDir() {
 
   const auto parentDir = std::filesystem::path(path_).parent_path();
 
-  if (std::filesystem::exists(parentDir))
+  // The non-throwing overloads (std::error_code): a path whose parent
+  // component is a regular file makes the throwing overloads raise
+  // filesystem_error, which would escape the worker thread and strand the
+  // open call. Report it as a normal open error instead.
+  std::error_code ec;
+  if (std::filesystem::exists(parentDir, ec) && !ec)
     return utils::error::none();
 
-  if (std::filesystem::create_directories(parentDir))
+  if (std::filesystem::create_directories(parentDir, ec))
     return utils::error::none();
 
-  return utils::error("couldn't create parent directory");
+  return utils::error("couldn't create parent directory" +
+                      (ec ? std::string(": ") + ec.message() : std::string()));
 }
 
 utils::error Database::validateOpenDatabase() {
