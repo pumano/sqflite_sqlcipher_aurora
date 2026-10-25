@@ -161,6 +161,7 @@ utils::error Database::open(const std::string &password) {
                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
   if (result_code != SQLITE_OK)
     return utils::error(currentErrorMessage(), currentErrorCode());
+  open_ = true;
 
   const auto keyError = setKey(password);
   if (keyError) {
@@ -193,6 +194,7 @@ utils::error Database::openReadOnly(const std::string &password) {
       sqlite3_open_v2(path_.c_str(), &db_, SQLITE_OPEN_READONLY, nullptr);
   if (result_code != SQLITE_OK)
     return utils::error(currentErrorMessage(), currentErrorCode());
+  open_ = true;
 
   const auto keyError = setKey(password);
   if (keyError) {
@@ -217,6 +219,7 @@ utils::error Database::openReadOnly(const std::string &password) {
 }
 
 utils::error Database::close() {
+  open_ = false;
   if (!db_)
     return utils::error::none();
 
@@ -451,16 +454,16 @@ utils::error Database::update(const std::string &sql, const EncodableList &args,
 
 void Database::processSqlCommand(int transactionID,
                                  const SqlCommandCallback &callback) {
-  if (currentTransactionID_ == DatabaseTransaction::ID::None) {
+  if (currentTransactionID_.load() == DatabaseTransaction::ID::None) {
     callback();
     return;
   }
 
-  if (transactionID == currentTransactionID_ ||
+  if (transactionID == currentTransactionID_.load() ||
       transactionID == DatabaseTransaction::ID::Force) {
     callback();
 
-    if (currentTransactionID_ == DatabaseTransaction::ID::None) {
+    if (currentTransactionID_.load() == DatabaseTransaction::ID::None) {
       drainPendingSqlCallbacks();
     }
 
@@ -479,8 +482,8 @@ void Database::processSqlCommand(int transactionID,
 void Database::drainPendingSqlCallbacks() {
   while (!pendingSqlCallbacks_.empty() && isOpen()) {
     const auto &front = pendingSqlCallbacks_.front();
-    if (currentTransactionID_ != DatabaseTransaction::ID::None &&
-        front.transactionID != currentTransactionID_ &&
+    if (currentTransactionID_.load() != DatabaseTransaction::ID::None &&
+        front.transactionID != currentTransactionID_.load() &&
         front.transactionID != DatabaseTransaction::ID::Force) {
       break;
     }
@@ -492,7 +495,7 @@ void Database::drainPendingSqlCallbacks() {
 
 void Database::resyncTransactionState() {
   if (!db_) {
-    currentTransactionID_ = DatabaseTransaction::ID::None;
+    currentTransactionID_.store(DatabaseTransaction::ID::None);
     return;
   }
   // sqlite3_get_autocommit() is 1 when no transaction is active and 0
@@ -500,7 +503,7 @@ void Database::resyncTransactionState() {
   // must not claim one either; if it is, the bookkeeping is left as is
   // (the transaction id is only known to the client that started it).
   if (sqlite3_get_autocommit(db_) != 0) {
-    currentTransactionID_ = DatabaseTransaction::ID::None;
+    currentTransactionID_.store(DatabaseTransaction::ID::None);
   }
 }
 
@@ -511,17 +514,17 @@ void Database::abortTransaction() {
     // already receives the original error.
     sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
   }
-  currentTransactionID_ = DatabaseTransaction::ID::None;
+  currentTransactionID_.store(DatabaseTransaction::ID::None);
 }
 
 void Database::enterInTransaction() {
   transactionID_ += 1;
-  currentTransactionID_ = transactionID_;
+  currentTransactionID_.store(transactionID_);
 }
 
-int Database::currentTransactionID() { return currentTransactionID_; }
+int Database::currentTransactionID() { return currentTransactionID_.load(); }
 
-bool Database::isOpen() const { return db_ != nullptr; }
+bool Database::isOpen() const { return open_.load(); }
 
 const std::string &Database::path() const { return path_; }
 
@@ -530,7 +533,7 @@ bool Database::isSingleInstance() const { return isSingleInstance_; }
 bool Database::isReadOnly() const { return isReadOnly_; }
 
 bool Database::isInTransaction() const {
-  return currentTransactionID_ != DatabaseTransaction::ID::None;
+  return currentTransactionID_.load() != DatabaseTransaction::ID::None;
 }
 
 int64_t Database::id() const { return id_; }
