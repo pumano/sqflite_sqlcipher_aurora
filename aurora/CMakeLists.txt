@@ -77,7 +77,7 @@ set_target_properties(${PLUGIN_NAME} PROPERTIES
 target_link_libraries(${PLUGIN_NAME} PUBLIC sqlcipher_prebuilt)
 
 target_include_directories(${PLUGIN_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_compile_definitions(${PLUGIN_NAME} PRIVATE PLUGIN_IMPL SQLITE_HAS_CODEC=1)
+target_compile_definitions(${PLUGIN_NAME} PRIVATE PLUGIN_IMPL)
 
 # Ship libsqlcipher.so.0 in the application bundle next to the plugin,
 # so the $ORIGIN rpath resolves it at runtime.
