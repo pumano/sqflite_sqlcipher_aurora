@@ -137,15 +137,34 @@ utils::error Database::setKey(const std::string &password) {
     return utils::error::none();
   }
 
-  // Apply the key via sqlite3_key on a private buffer rather than a
-  // `PRAGMA key = '...'` string: the key never lands in a SQL string (so it
-  // cannot be logged or need escaping), and NUL bytes in the key are preserved
-  // (a C-string pragma would truncate at the first NUL). The buffer is wiped
-  // afterwards so the key bytes do not linger in memory.
-  std::string key(password);
-  const int rc = sqlite3_key_v2(db_, "main", key.data(),
-                                static_cast<int>(key.size()));
-  secureWipe(key.data(), key.size());
+  // PRAGMA key treats the value as a passphrase (KDF → 32-byte key),
+  // matching the Dart API contract (openDatabase password is a passphrase,
+  // same as on Android/iOS). sqlite3_key_v2 would interpret the bytes as a
+  // raw AES key (16/24/32 bytes only) and crash on longer passphrases.
+  //
+  // NUL bytes are not supported: PRAGMA key is a C-string and would silently
+  // truncate the passphrase at the first NUL. Reject them explicitly.
+  if (password.find('\0') != std::string::npos) {
+    return utils::error("Key must not contain NUL bytes", SQLITE_ERROR);
+  }
+
+  // Escape single quotes and pass the key as a quoted SQL literal. The
+  // resulting string is wiped after use so the key does not linger.
+  std::string sql;
+  sql.reserve(password.size() * 2 + 16);
+  sql += "PRAGMA key = '";
+  for (const char c : password) {
+    sql += c;
+    if (c == '\'' ) {
+      sql += '\'';
+    }
+  }
+  sql += '\'';
+
+  char *errmsg = nullptr;
+  const int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &errmsg);
+  if (errmsg) sqlite3_free(errmsg);
+  secureWipe(sql.data(), sql.size());
   if (rc != SQLITE_OK) {
     return utils::error(sqlite3_errmsg(db_), rc);
   }
