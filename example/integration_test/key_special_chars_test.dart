@@ -1,9 +1,8 @@
 // A database key may contain characters that are special in SQL (quotes,
-// unicode) or that cannot be represented in a SQL string literal at all (NUL).
-// The key is applied via sqlite3_key_v2() on a binary-safe buffer, never as a
-// constructed PRAGMA statement, so none of these keys can be truncated or
-// mis-escaped. Each key must round-trip: open with it, write, close, re-open
-// with the same key, read back.
+// unicode). The key is applied via PRAGMA key (passphrase semantics, matching
+// the Dart API contract). Single quotes are escaped; unicode passes through.
+// NUL bytes are not supported (PRAGMA key is a C-string) and must be rejected
+// with a clear error rather than silently truncating the key.
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -14,22 +13,38 @@ import 'package:sqflite_sqlcipher/sqflite.dart' as sqlcipher;
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  // (key, expected readable back) — the value stored is always 'v'.
+  // (key, shouldSucceed) — the value stored is always 'v'.
   final cases = <List<Object>>[
-    ["it's a key", 0], // single quote
-    ['pässword_ключ', 1], // unicode
-    [String.fromCharCodes([105, 116, 0, 115]), 2], // embedded NUL
+    ["it's a key", true], // single quote → escaped
+    ['pässword_ключ', true], // unicode → passes through
+    [String.fromCharCodes([105, 116, 0, 115]), false], // embedded NUL → error
   ];
 
   for (final c in cases) {
     final key = c[0] as String;
-    final idx = c[1] as int;
-    testWidgets('key round-trips (case $idx)', (tester) async {
+    final shouldSucceed = c[1] as bool;
+    final idx = cases.indexOf(c);
+
+    testWidgets('key special chars (case $idx)', (tester) async {
       final dbDir = await sqlcipher.getDatabasesPath();
       final path = p.join(dbDir, 'keytest_$idx.db');
       for (final suffix in <String>['', '-journal', '-wal', '-shm']) {
         final f = File('$path$suffix');
         if (f.existsSync()) f.deleteSync();
+      }
+
+      if (!shouldSucceed) {
+        // NUL in the key must be rejected with an error.
+        expect(
+          () => sqlcipher.openDatabase(path, password: key),
+          throwsA(isA<Exception>()),
+        );
+        // Clean up any partial file.
+        for (final suffix in <String>['', '-journal', '-wal', '-shm']) {
+          final f = File('$path$suffix');
+          if (f.existsSync()) f.deleteSync();
+        }
+        return;
       }
 
       final db =

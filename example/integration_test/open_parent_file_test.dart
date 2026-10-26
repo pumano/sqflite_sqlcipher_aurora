@@ -16,8 +16,11 @@ void main() {
 
   test('openDatabase under a regular file fails with an error, not a hang',
       () async {
+    final dbDir = await sqlcipher.getDatabasesPath();
+    final dir = Directory(dbDir);
+    if (!dir.existsSync()) dir.createSync(recursive: true);
     final blocker = File(
-        '${await sqlcipher.getDatabasesPath()}/blocker_${DateTime.now().microsecondsSinceEpoch}');
+        '$dbDir/blocker_${DateTime.now().microsecondsSinceEpoch}');
     blocker.writeAsStringSync('regular file, not a directory');
 
     sqlcipher.Database? opened;
