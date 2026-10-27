@@ -78,6 +78,12 @@ public:
   // non-transactional commands forever.
   void abortTransaction();
 
+  // Race-free snapshot of the connection handle: db_handle_ is written only
+  // by the async worker thread (open/openReadOnly/close) and read from the
+  // channel thread here (single-instance re-open check). Relaxed ordering:
+  // no ordering with other state is needed — the worker is the sole mutator
+  // of real state, and the channel thread only null-checks the pointer, it
+  // never dereferences it. Relaxed = plain LDR/STR, no STLR barrier.
   bool isOpen() const;
   bool isSingleInstance() const;
   bool isInTransaction() const;
@@ -112,5 +118,12 @@ public:
   std::queue<PendingSqlCommand> pendingSqlCallbacks_;
   int64_t cursorID_;
   std::unordered_map<int64_t, Cursor> cursors_;
-  sqlite3 *db_;
+  // Connection handle, atomically published for the channel-thread read in
+  // isOpen(). See isOpen() for the thread model.
+  std::atomic<sqlite3*> db_handle_{nullptr};
+  // Non-atomic view of db_handle_ for worker-thread code: every Database
+  // method except isOpen() runs on the async worker thread, where a relaxed
+  // load is sufficient and no other thread mutates the handle. Do not call
+  // from other threads.
+  sqlite3* db() const { return db_handle_.load(std::memory_order_relaxed); }
 };

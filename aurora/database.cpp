@@ -128,7 +128,7 @@ Database::Database(int id, const std::string &path, bool singleInstance,
     : id_(id), path_(path), isSingleInstance_(singleInstance),
       logger_(logger.logLevel(), logger.tag() + "-db-" + std::to_string(id)),
       transactionID_(0), currentTransactionID_(DatabaseTransaction::ID::None),
-      cursorID_(0), db_(nullptr) {}
+      cursorID_(0) {}
 
 Database::~Database() { close(); }
 
@@ -162,11 +162,11 @@ utils::error Database::setKey(const std::string &password) {
   sql += '\'';
 
   char *errmsg = nullptr;
-  const int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &errmsg);
+  const int rc = sqlite3_exec(db(), sql.c_str(), nullptr, nullptr, &errmsg);
   if (errmsg) sqlite3_free(errmsg);
   secureWipe(sql.data(), sql.size());
   if (rc != SQLITE_OK) {
-    return utils::error(sqlite3_errmsg(db_), rc);
+    return utils::error(sqlite3_errmsg(db()), rc);
   }
   return utils::error::none();
 }
@@ -176,9 +176,13 @@ utils::error Database::open(const std::string &password) {
   if (error)
     return error;
 
-  int result_code =
-      sqlite3_open_v2(path_.c_str(), &db_,
+  // Open into a local and publish it only through the atomic: the channel
+  // thread may be reading the handle in isOpen() while this runs.
+  sqlite3* handle = nullptr;
+  const int result_code =
+      sqlite3_open_v2(path_.c_str(), &handle,
                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+  db_handle_.store(handle, std::memory_order_relaxed);
   if (result_code != SQLITE_OK)
     return utils::error(currentErrorMessage(), currentErrorCode());
 
@@ -189,7 +193,7 @@ utils::error Database::open(const std::string &password) {
   }
 
   isReadOnly_ = false;
-  sqlite3_busy_timeout(db_, 1000);
+  sqlite3_busy_timeout(db(), 1000);
   const auto validationError = validateOpenDatabase();
   if (!validationError) {
     return utils::error::none();
@@ -209,8 +213,12 @@ utils::error Database::openReadOnly(const std::string &password) {
   if (error)
     return error;
 
-  int result_code =
-      sqlite3_open_v2(path_.c_str(), &db_, SQLITE_OPEN_READONLY, nullptr);
+  // Open into a local and publish it only through the atomic: the channel
+  // thread may be reading the handle in isOpen() while this runs.
+  sqlite3* handle = nullptr;
+  const int result_code =
+      sqlite3_open_v2(path_.c_str(), &handle, SQLITE_OPEN_READONLY, nullptr);
+  db_handle_.store(handle, std::memory_order_relaxed);
   if (result_code != SQLITE_OK)
     return utils::error(currentErrorMessage(), currentErrorCode());
 
@@ -221,7 +229,7 @@ utils::error Database::openReadOnly(const std::string &password) {
   }
 
   isReadOnly_ = true;
-  sqlite3_busy_timeout(db_, 1000);
+  sqlite3_busy_timeout(db(), 1000);
 
   // For an encrypted database the key is only proved by a real query;
   // a wrong key would otherwise surface later as "file is not a database".
@@ -237,7 +245,7 @@ utils::error Database::openReadOnly(const std::string &password) {
 }
 
 utils::error Database::close() {
-  if (!db_)
+  if (!db())
     return utils::error::none();
 
   // Finalize the still-open cursor statements first: sqlite3_close_v2()
@@ -251,10 +259,10 @@ utils::error Database::close() {
   }
   cursors_.clear();
 
-  if (sqlite3_close_v2(db_) != SQLITE_OK)
+  if (sqlite3_close_v2(db()) != SQLITE_OK)
     return utils::error(currentErrorMessage(), currentErrorCode());
 
-  db_ = nullptr;
+  db_handle_.store(nullptr, std::memory_order_relaxed);
 
   // Reset the transaction state: a command that reaches
   // processSqlCommand() only after this close must not see the stale
@@ -265,7 +273,7 @@ utils::error Database::close() {
 
   // Complete the still-queued commands with an error instead of dropping
   // them: each callback drives a Dart future, and silently destroying it
-  // would leave that future pending forever. With db_ now null, the SQL
+  // would leave that future pending forever. With the handle now null, the SQL
   // methods return a "database closed" error, so every queued command
   // resolves (with that error) rather than hanging.
   while (!pendingSqlCallbacks_.empty()) {
@@ -279,7 +287,7 @@ utils::error Database::close() {
 
 utils::error Database::execute(const std::string &sql,
                                const EncodableList &args) {
-  if (!db_)
+  if (!db())
     return utils::error("database closed");
 
   const char *sqlPtr = sql.c_str();
@@ -289,7 +297,7 @@ utils::error Database::execute(const std::string &sql,
   while (sqlPtr && *sqlPtr != '\0') {
     sqlite3_stmt *stmt = nullptr;
 
-    if (sqlite3_prepare_v2(db_, sqlPtr, -1, &stmt, &tail) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db(), sqlPtr, -1, &stmt, &tail) != SQLITE_OK)
       return utils::error(currentErrorMessage(), currentErrorCode());
 
     sqlPtr = tail;
@@ -333,12 +341,12 @@ utils::error Database::execute(const std::string &sql,
 
 utils::error Database::query(const std::string &sql, const EncodableList &args,
                              EncodableMap &result) {
-  if (!db_)
+  if (!db())
     return utils::error("database closed");
 
   sqlite3_stmt *stmt = nullptr;
 
-  if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
+  if (sqlite3_prepare_v2(db(), sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
     return utils::error(currentErrorMessage(), currentErrorCode());
 
   const auto error = bindStmtArgs(stmt, args);
@@ -411,12 +419,12 @@ utils::error Database::queryWithPageSize(const std::string &sql,
                                          const EncodableList &args,
                                          int64_t pageSize,
                                          EncodableMap &result) {
-  if (!db_)
+  if (!db())
     return utils::error("database closed");
 
   sqlite3_stmt *stmt = nullptr;
 
-  if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
+  if (sqlite3_prepare_v2(db(), sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
     return utils::error(currentErrorMessage(), currentErrorCode());
 
   const auto error = bindStmtArgs(stmt, args);
@@ -434,7 +442,7 @@ utils::error Database::queryWithPageSize(const std::string &sql,
 
 utils::error Database::queryCursorNext(int cursorID, bool cancel,
                                        EncodableMap &result) {
-  if (!db_)
+  if (!db())
     return utils::error("database closed");
 
   logger_.verb() << "querying cursor next (ID=" << cursorID
@@ -455,7 +463,7 @@ utils::error Database::queryCursorNext(int cursorID, bool cancel,
 
 utils::error Database::insert(const std::string &sql, const EncodableList &args,
                               int64_t &insertID) {
-  if (!db_)
+  if (!db())
     return utils::error("database closed");
   if (isReadOnly_)
     return utils::error("database is readonly");
@@ -465,7 +473,7 @@ utils::error Database::insert(const std::string &sql, const EncodableList &args,
   if (error)
     return error;
 
-  const int updated = sqlite3_changes(db_);
+  const int updated = sqlite3_changes(db());
 
   logger_.sql() << "rows updated: " << updated << std::endl;
 
@@ -474,7 +482,7 @@ utils::error Database::insert(const std::string &sql, const EncodableList &args,
     return utils::error::none();
   }
 
-  insertID = sqlite3_last_insert_rowid(db_);
+  insertID = sqlite3_last_insert_rowid(db());
   if (insertID == 0) {
     // Match sqflite compat behavior for tables created WITHOUT ROWID.
     insertID = updated;
@@ -486,7 +494,7 @@ utils::error Database::insert(const std::string &sql, const EncodableList &args,
 
 utils::error Database::update(const std::string &sql, const EncodableList &args,
                               int &updated) {
-  if (!db_)
+  if (!db())
     return utils::error("database closed");
   if (isReadOnly_)
     return utils::error("database is readonly");
@@ -496,7 +504,7 @@ utils::error Database::update(const std::string &sql, const EncodableList &args,
   if (error)
     return error;
 
-  updated = sqlite3_changes(db_);
+  updated = sqlite3_changes(db());
   logger_.sql() << "rows updated: " << updated << std::endl;
 
   return utils::error::none();
@@ -504,7 +512,7 @@ utils::error Database::update(const std::string &sql, const EncodableList &args,
 
 void Database::processSqlCommand(int transactionID,
                                  const SqlCommandCallback &callback) {
-  if (!db_) {
+  if (!db()) {
     // The database was closed after this command was queued: run the
     // callback anyway so its Dart future resolves (the SQL method returns
     // a "database closed" error) instead of queueing it behind a
@@ -553,7 +561,7 @@ void Database::drainPendingSqlCallbacks() {
 }
 
 void Database::resyncTransactionState() {
-  if (!db_) {
+  if (!db()) {
     currentTransactionID_.store(DatabaseTransaction::ID::None);
     return;
   }
@@ -561,17 +569,17 @@ void Database::resyncTransactionState() {
   // inside one. If the handle is not in a transaction, the bookkeeping
   // must not claim one either; if it is, the bookkeeping is left as is
   // (the transaction id is only known to the client that started it).
-  if (sqlite3_get_autocommit(db_) != 0) {
+  if (sqlite3_get_autocommit(db()) != 0) {
     currentTransactionID_.store(DatabaseTransaction::ID::None);
   }
 }
 
 void Database::abortTransaction() {
-  if (db_ && sqlite3_get_autocommit(db_) == 0) {
+  if (db() && sqlite3_get_autocommit(db()) == 0) {
     // The handle is still inside the transaction (e.g. a deferred
     // constraint rejected the COMMIT). End it; best effort, the client
     // already receives the original error.
-    sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+    sqlite3_exec(db(), "ROLLBACK", nullptr, nullptr, nullptr);
   }
   currentTransactionID_.store(DatabaseTransaction::ID::None);
 }
@@ -583,7 +591,9 @@ void Database::enterInTransaction() {
 
 int Database::currentTransactionID() { return currentTransactionID_.load(); }
 
-bool Database::isOpen() const { return db_ != nullptr; }
+bool Database::isOpen() const {
+  return db_handle_.load(std::memory_order_relaxed) != nullptr;
+}
 
 const std::string &Database::path() const { return path_; }
 
@@ -604,14 +614,14 @@ bool Database::isInMemory() const {
 }
 
 std::string Database::currentErrorMessage() {
-  const auto message = sqlite3_errmsg(db_);
+  const auto message = sqlite3_errmsg(db());
   const auto code = currentErrorCode();
 
   return std::string(message) + " (code " + std::to_string(code) + ")";
 }
 
 int Database::currentErrorCode() {
-  return sqlite3_extended_errcode(db_);
+  return sqlite3_extended_errcode(db());
 }
 
 utils::error Database::createParentDir() {
@@ -638,7 +648,7 @@ utils::error Database::createParentDir() {
 utils::error Database::validateOpenDatabase() {
   sqlite3_stmt *stmt = nullptr;
   const auto status =
-      sqlite3_prepare_v2(db_, "PRAGMA user_version", -1, &stmt, nullptr);
+      sqlite3_prepare_v2(db(), "PRAGMA user_version", -1, &stmt, nullptr);
   if (status != SQLITE_OK)
     return utils::error(currentErrorMessage(), currentErrorCode());
 
@@ -804,7 +814,7 @@ utils::error Database::resultFromCursor(const Cursor &cursor,
 
 utils::error Database::batch(const std::vector<Operation> &operations,
                              bool continueOnError, EncodableList &results) {
-  if (!db_)
+  if (!db())
     return utils::error("database closed");
 
   for (const auto &operation : operations) {
