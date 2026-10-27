@@ -1,3 +1,32 @@
+## 0.2.1
+
+Fixes two regressions introduced in 0.2.0 (a crash on open and a key
+handling change) and closes the data race on the connection handle.
+
+### Crash on open
+
+* The seq_cst atomics added in 0.2.0 emitted a full memory barrier
+  (STLR) on ARMv8 inside the open path, which serialized the
+  method-channel thread behind the worker until the 30 s method-call
+  timeout aborted the process. The open path is barrier-free again.
+
+### Key handling
+
+* The key is applied with `PRAGMA key` again: passphrase semantics,
+  matching the sqflite_sqlcipher contract on Android/iOS. The 0.2.0
+  switch to `sqlite3_key_v2` interpreted the password as a raw 16/24/32
+  byte AES key and crashed on longer passphrases. The 0.2.0 safety
+  improvements (quote escaping, NUL rejection, post-use wipe) are kept.
+
+### Thread safety
+
+* The `sqlite3*` handle is now a relaxed atomic: the channel-thread
+  `isOpen()` read is race-free (no more undefined behaviour) while
+  emitting the same barrier-free instructions as before.
+
+All 39 integration tests pass on the Aurora 5.2.1.200 emulator,
+including a new 300x close/open churn test.
+
 ## 0.2.0
 
 The first release after the initial template: a batch of correctness and
