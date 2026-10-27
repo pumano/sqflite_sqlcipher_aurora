@@ -237,7 +237,6 @@ utils::error Database::openReadOnly(const std::string &password) {
 }
 
 utils::error Database::close() {
-  open_ = false;
   if (!db_)
     return utils::error::none();
 
@@ -262,15 +261,26 @@ utils::error Database::close() {
   // transaction id and queue itself behind a transaction that no longer
   // exists - nobody would ever run it, and its Dart future would hang.
   transactionID_ = 0;
-  currentTransactionID_ = DatabaseTransaction::ID::None;
+  currentTransactionID_.store(DatabaseTransaction::ID::None);
 
-  pendingSqlCallbacks_ = {};
+  // Complete the still-queued commands with an error instead of dropping
+  // them: each callback drives a Dart future, and silently destroying it
+  // would leave that future pending forever. With db_ now null, the SQL
+  // methods return a "database closed" error, so every queued command
+  // resolves (with that error) rather than hanging.
+  while (!pendingSqlCallbacks_.empty()) {
+    const auto command = pendingSqlCallbacks_.front();
+    pendingSqlCallbacks_.pop();
+    command.callback();
+  }
 
   return utils::error::none();
 }
 
 utils::error Database::execute(const std::string &sql,
                                const EncodableList &args) {
+  if (!db_)
+    return utils::error("database closed");
 
   const char *sqlPtr = sql.c_str();
   const char *tail = nullptr;
@@ -323,6 +333,8 @@ utils::error Database::execute(const std::string &sql,
 
 utils::error Database::query(const std::string &sql, const EncodableList &args,
                              EncodableMap &result) {
+  if (!db_)
+    return utils::error("database closed");
 
   sqlite3_stmt *stmt = nullptr;
 
@@ -399,6 +411,8 @@ utils::error Database::queryWithPageSize(const std::string &sql,
                                          const EncodableList &args,
                                          int64_t pageSize,
                                          EncodableMap &result) {
+  if (!db_)
+    return utils::error("database closed");
 
   sqlite3_stmt *stmt = nullptr;
 
@@ -420,6 +434,8 @@ utils::error Database::queryWithPageSize(const std::string &sql,
 
 utils::error Database::queryCursorNext(int cursorID, bool cancel,
                                        EncodableMap &result) {
+  if (!db_)
+    return utils::error("database closed");
 
   logger_.verb() << "querying cursor next (ID=" << cursorID
                   << "; CANCEL=" << cancel << ")" << std::endl;
@@ -439,6 +455,8 @@ utils::error Database::queryCursorNext(int cursorID, bool cancel,
 
 utils::error Database::insert(const std::string &sql, const EncodableList &args,
                               int64_t &insertID) {
+  if (!db_)
+    return utils::error("database closed");
   if (isReadOnly_)
     return utils::error("database is readonly");
 
@@ -468,6 +486,8 @@ utils::error Database::insert(const std::string &sql, const EncodableList &args,
 
 utils::error Database::update(const std::string &sql, const EncodableList &args,
                               int &updated) {
+  if (!db_)
+    return utils::error("database closed");
   if (isReadOnly_)
     return utils::error("database is readonly");
 
@@ -484,7 +504,11 @@ utils::error Database::update(const std::string &sql, const EncodableList &args,
 
 void Database::processSqlCommand(int transactionID,
                                  const SqlCommandCallback &callback) {
-  if (currentTransactionID_ == DatabaseTransaction::ID::None) {
+  if (!db_) {
+    callback();
+    return;
+  }
+  if (currentTransactionID_.load() == DatabaseTransaction::ID::None) {
     callback();
     return;
   }
@@ -493,7 +517,7 @@ void Database::processSqlCommand(int transactionID,
       transactionID == DatabaseTransaction::ID::Force) {
     callback();
 
-    if (currentTransactionID_ == DatabaseTransaction::ID::None) {
+    if (currentTransactionID_.load() == DatabaseTransaction::ID::None) {
       drainPendingSqlCallbacks();
     }
 
@@ -512,7 +536,7 @@ void Database::processSqlCommand(int transactionID,
 void Database::drainPendingSqlCallbacks() {
   while (!pendingSqlCallbacks_.empty() && isOpen()) {
     const auto &front = pendingSqlCallbacks_.front();
-    if (currentTransactionID_ != DatabaseTransaction::ID::None &&
+    if (currentTransactionID_.load() != DatabaseTransaction::ID::None &&
         front.transactionID != currentTransactionID_ &&
         front.transactionID != DatabaseTransaction::ID::Force) {
       break;
@@ -525,7 +549,7 @@ void Database::drainPendingSqlCallbacks() {
 
 void Database::resyncTransactionState() {
   if (!db_) {
-    currentTransactionID_ = DatabaseTransaction::ID::None;
+    currentTransactionID_.store(DatabaseTransaction::ID::None);
     return;
   }
   // sqlite3_get_autocommit() is 1 when no transaction is active and 0
@@ -533,7 +557,7 @@ void Database::resyncTransactionState() {
   // must not claim one either; if it is, the bookkeeping is left as is
   // (the transaction id is only known to the client that started it).
   if (sqlite3_get_autocommit(db_) != 0) {
-    currentTransactionID_ = DatabaseTransaction::ID::None;
+    currentTransactionID_.store(DatabaseTransaction::ID::None);
   }
 }
 
@@ -544,17 +568,17 @@ void Database::abortTransaction() {
     // already receives the original error.
     sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
   }
-  currentTransactionID_ = DatabaseTransaction::ID::None;
+  currentTransactionID_.store(DatabaseTransaction::ID::None);
 }
 
 void Database::enterInTransaction() {
   transactionID_ += 1;
-  currentTransactionID_ = transactionID_;
+  currentTransactionID_.store(transactionID_);
 }
 
-int Database::currentTransactionID() { return currentTransactionID_; }
+int Database::currentTransactionID() { return currentTransactionID_.load(); }
 
-bool Database::isOpen() const { return open_.load(); }
+bool Database::isOpen() const { return db_ != nullptr; }
 
 const std::string &Database::path() const { return path_; }
 
@@ -563,7 +587,7 @@ bool Database::isSingleInstance() const { return isSingleInstance_; }
 bool Database::isReadOnly() const { return isReadOnly_; }
 
 bool Database::isInTransaction() const {
-  return currentTransactionID_ != DatabaseTransaction::ID::None;
+  return currentTransactionID_.load() != DatabaseTransaction::ID::None;
 }
 
 int64_t Database::id() const { return id_; }
@@ -775,6 +799,8 @@ utils::error Database::resultFromCursor(const Cursor &cursor,
 
 utils::error Database::batch(const std::vector<Operation> &operations,
                              bool continueOnError, EncodableList &results) {
+  if (!db_)
+    return utils::error("database closed");
 
   for (const auto &operation : operations) {
     const auto &method = operation.method;

@@ -108,10 +108,9 @@ public:
   int transactionID_;
   // Atomic: written by the worker (enter/abort/resync) and read from the
   // channel thread by isInTransaction() (single-instance re-open check).
-  int currentTransactionID_;
+  std::atomic<int> currentTransactionID_{DatabaseTransaction::ID::None};
   std::queue<PendingSqlCommand> pendingSqlCallbacks_;
   int64_t cursorID_;
   std::unordered_map<int64_t, Cursor> cursors_;
   sqlite3 *db_;
-  std::atomic<bool> open_{false};
 };
