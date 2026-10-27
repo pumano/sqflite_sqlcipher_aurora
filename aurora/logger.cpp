@@ -93,9 +93,3 @@ std::ostream &Logger::sql() {
 
   return devnull_;
 }
-
-std::ostream &Logger::error() {
-  // Always reported: a swallowed exception is worth seeing even when the
-  // verbose/sql logging is turned off.
-  return logerr << (tag_.empty() ? "" : "[" + tag_ + "] ");
-}

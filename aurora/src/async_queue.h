@@ -17,10 +17,6 @@
 class AsyncQueue final {
 public:
   using Task = std::function<void()>;
-  // Invoked when a task throws; the message describes the exception. The
-  // queue is a generic utility, so it only reports the exception — deciding
-  // what to do with it (log, reply to the channel) is up to the owner.
-  using ExceptionHandler = std::function<void(const std::string &)>;
 
   AsyncQueue();
   ~AsyncQueue();
@@ -33,7 +29,6 @@ public:
 
   void push(const Task &task);
   bool isRunning() const;
-  void setExceptionHandler(ExceptionHandler handler);
 
 private:
   void run(std::promise<std::int32_t> promise);
@@ -56,5 +51,4 @@ private:
   std::unique_ptr<std::thread> thread_;
   std::vector<Task> tasks_;
   std::mutex taskMutex_;
-  ExceptionHandler exceptionHandler_;
 };

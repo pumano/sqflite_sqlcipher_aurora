@@ -27,8 +27,6 @@ public:
 
   std::ostream &verb();
   std::ostream &sql();
-  // Errors are always reported, regardless of the verbosity level.
-  std::ostream &error();
 
 private:
   Level level_;
