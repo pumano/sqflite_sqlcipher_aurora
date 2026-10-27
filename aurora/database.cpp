@@ -237,6 +237,7 @@ utils::error Database::openReadOnly(const std::string &password) {
 }
 
 utils::error Database::close() {
+  open_ = false;
   if (!db_)
     return utils::error::none();
 
@@ -553,7 +554,7 @@ void Database::enterInTransaction() {
 
 int Database::currentTransactionID() { return currentTransactionID_; }
 
-bool Database::isOpen() const { return db_ != nullptr; }
+bool Database::isOpen() const { return open_.load(); }
 
 const std::string &Database::path() const { return path_; }
 

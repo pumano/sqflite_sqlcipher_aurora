@@ -6,6 +6,7 @@
 
 #include <client_wrapper/encodable_value.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <queue>
@@ -112,4 +113,5 @@ public:
   int64_t cursorID_;
   std::unordered_map<int64_t, Cursor> cursors_;
   sqlite3 *db_;
+  std::atomic<bool> open_{false};
 };
