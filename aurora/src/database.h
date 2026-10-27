@@ -113,9 +113,4 @@ public:
   int64_t cursorID_;
   std::unordered_map<int64_t, Cursor> cursors_;
   sqlite3 *db_;
-  // Mirrors (db_ != nullptr) but is atomic: isOpen() is called from the
-  // channel thread (single-instance re-open check) while open()/close()
-  // mutate db_ on the async worker thread. Reading the raw pointer from two
-  // threads is a data race; the flag is not.
-  std::atomic<bool> open_{false};
 };
