@@ -13,10 +13,8 @@ project(${PROJECT_NAME} LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wno-psabi -fsanitize=address -fno-omit-frame-pointer")
-set(CMAKE_CXX_FLAGS_RELEASE "-O1")
-set(CMAKE_EXE_LINKER_FLAGS "-fsanitize=address")
-set(CMAKE_SHARED_LINKER_FLAGS "-fsanitize=address")
+set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wno-psabi")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 
 # SQLCipher is a drop-in replacement for SQLite: it provides the same
 # C API (sqlite3.h, vendored in include/) and the same sqlite3_* symbols,
