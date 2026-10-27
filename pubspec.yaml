@@ -1,6 +1,6 @@
 name: sqflite_sqlcipher_aurora
 description: "Aurora OS (Linux) implementation for sqflite_sqlcipher: SQLCipher-encrypted SQLite via a native libsqlcipher binding."
-version: 0.2.0
+version: 0.2.1
 homepage: https://github.com/pumano/sqflite_sqlcipher_aurora
 
 environment:
