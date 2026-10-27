@@ -70,25 +70,31 @@ class cexit {
 }  // namespace
 
 Logger::Logger(Level level, const std::string &tag)
-    : level_(level), tag_(tag), devnull_(0) {}
+    : level_(static_cast<int>(level)), tag_(tag) {}
 
-Logger::Level Logger::logLevel() const { return level_; }
+Logger::Level Logger::logLevel() const {
+  return static_cast<Level>(level_.load(std::memory_order_relaxed));
+}
 
-void Logger::setLogLevel(Level level) { level_ = level; }
+void Logger::setLogLevel(Level level) {
+  level_.store(static_cast<int>(level), std::memory_order_relaxed);
+}
 
 std::string Logger::tag() const { return tag_; }
 
 void Logger::setTag(const std::string &tag) { tag_ = tag; }
 
 std::ostream &Logger::verb() {
-  if (level_ >= Level::Verbose)
+  const int level = level_.load(std::memory_order_relaxed);
+  if (level >= Level::Verbose)
     return loginfo << (tag_.empty() ? "" : "[" + tag_ + "] ");
 
   return devnull_;
 }
 
 std::ostream &Logger::sql() {
-  if (level_ >= Level::Sql)
+  const int level = level_.load(std::memory_order_relaxed);
+  if (level >= Level::Sql)
     return loginfo << (tag_.empty() ? "" : "[" + tag_ + "] ");
 
   return devnull_;

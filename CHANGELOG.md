@@ -1,3 +1,11 @@
+## 0.2.2
+
+* The log level is now a relaxed atomic: `options` (setLogLevel) runs on
+  the method-channel thread while the worker thread reads the level on
+  every log line; the plain enum was a data race. Relaxed ordering --
+  only the value matters, and a stale level for one line is harmless.
+  This closes the last cross-thread access in the plugin.
+
 ## 0.2.1
 
 Fixes two regressions introduced in 0.2.0 (a crash on open and a key
