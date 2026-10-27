@@ -181,7 +181,6 @@ utils::error Database::open(const std::string &password) {
                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
   if (result_code != SQLITE_OK)
     return utils::error(currentErrorMessage(), currentErrorCode());
-  open_ = true;
 
   const auto keyError = setKey(password);
   if (keyError) {
@@ -214,7 +213,6 @@ utils::error Database::openReadOnly(const std::string &password) {
       sqlite3_open_v2(path_.c_str(), &db_, SQLITE_OPEN_READONLY, nullptr);
   if (result_code != SQLITE_OK)
     return utils::error(currentErrorMessage(), currentErrorCode());
-  open_ = true;
 
   const auto keyError = setKey(password);
   if (keyError) {
@@ -239,7 +237,6 @@ utils::error Database::openReadOnly(const std::string &password) {
 }
 
 utils::error Database::close() {
-  open_ = false;
   if (!db_)
     return utils::error::none();
 
@@ -586,7 +583,7 @@ void Database::enterInTransaction() {
 
 int Database::currentTransactionID() { return currentTransactionID_.load(); }
 
-bool Database::isOpen() const { return open_.load(); }
+bool Database::isOpen() const { return db_ != nullptr; }
 
 const std::string &Database::path() const { return path_; }
 
