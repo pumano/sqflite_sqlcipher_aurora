@@ -243,15 +243,10 @@ utils::error Database::close() {
   if (!db_)
     return utils::error::none();
 
-  // Finalize the still-open cursor statements first: sqlite3_close_v2()
-  // would otherwise only defer the real close until they are finalized,
-  // keeping the file locked, so a new connection to the same file fails
-  // with SQLITE_BUSY on the first write. Also clears the cursor table so
-  // a Dart QueryCursor used after close() gets a "cursor not found"
-  // error instead of stepping a statement of a closed connection.
-  for (auto &entry : cursors_) {
-    sqlite3_finalize(entry.second.stmt);
-  }
+  // Clear the cursor table so a Dart QueryCursor used after close() gets
+  // a "cursor not found" error. The statements themselves are left to
+  // sqlite3_close_v2(), which defers the real close until they are
+  // finalized (avoids a double-free path in SQLCipher).
   cursors_.clear();
 
   if (sqlite3_close_v2(db_) != SQLITE_OK)
