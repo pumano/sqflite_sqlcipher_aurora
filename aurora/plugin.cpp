@@ -1,8 +1,13 @@
 #include <sqflite_sqlcipher_aurora/plugin.h>
 
+#include <atomic>
+#include <cctype>
+#include <cstring>
 #include <filesystem>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include <client_wrapper/method_channel.h>
@@ -10,12 +15,176 @@
 
 #include "src/sqflite_sqlcipher_aurora_plugin.h"
 
+namespace {
+
+// One-shot wrapper around the channel result.
+//
+// `MethodResult` documents that "only one method should be called on any
+// given instance" but does not enforce it. Tasks answer it from the queue
+// worker thread; if a task throws before answering, the queue exception
+// path answers on its behalf. The flag makes "at most one reply" hold in
+// both cases, so a second reply can never be sent for one call.
+class Reply final {
+ public:
+  explicit Reply(
+      std::shared_ptr<SqfliteSqlcipherAuroraPlugin::MethodResult> result)
+      : result_(std::move(result)) {}
+
+  void Success() {
+    if (claim())
+      result_->Success();
+  }
+
+  template <typename T>
+  void Success(const T& value) {
+    if (claim())
+      result_->Success(value);
+  }
+
+  void Error(const std::string& code, const std::string& message = "") {
+    if (claim())
+      result_->Error(code, message);
+  }
+
+  template <typename T>
+  void Error(const std::string& code, const std::string& message,
+             const T& details) {
+    if (claim())
+      result_->Error(code, message, details);
+  }
+
+  // The exception path: answer with an error only if the task died before
+  // answering.
+  void Fail(const std::string& message) {
+    if (claim())
+      result_->Error(Errors::Internal, message);
+  }
+
+ private:
+  bool claim() {
+    bool expected = false;
+    return answered_.compare_exchange_strong(expected, true);
+  }
+
+  std::shared_ptr<SqfliteSqlcipherAuroraPlugin::MethodResult> result_;
+  std::atomic<bool> answered_{false};
+};
+
+// Pushes a task onto the queue with a last-resort guard: if the task throws
+// before answering its call, the call is answered with an error instead of
+// being left pending forever.
+void enqueueTask(AsyncQueue& queue, const std::shared_ptr<Reply>& reply,
+                 AsyncQueue::Task task) {
+  queue.push([reply, task = std::move(task)] {
+    try {
+      task();
+    } catch (const std::exception& e) {
+      reply->Fail(e.what() ? e.what() : "unknown exception");
+    } catch (...) {
+      reply->Fail("unknown non-std exception");
+    }
+  });
+}
+
+// The same last-resort guard, bound to the callback's own reply, for the
+// SQL command callbacks passed to `processSqlCommand`. Such a callback runs
+// either immediately or later, from the drain of the pending commands that
+// another call (a COMMIT / ROLLBACK / close) triggers; by then the outer
+// task's guard has long finished, so an exception thrown while the callback
+// runs (for example a bad_alloc building the response) would otherwise
+// answer the wrong call or, that one already being answered, vanish - and
+// interrupt the drain, stranding the remaining queued commands. Answering
+// is one-shot (Reply), so a callback that answered before throwing can
+// never be answered twice.
+AsyncQueue::Task guardSqlCallback(const std::shared_ptr<Reply>& reply,
+                                  AsyncQueue::Task callback) {
+  return [reply, callback = std::move(callback)] {
+    try {
+      callback();
+    } catch (const std::exception& e) {
+      reply->Fail(e.what() ? e.what() : "unknown exception");
+    } catch (...) {
+      reply->Fail("unknown non-std exception");
+    }
+  };
+}
+
+}  // namespace
+
+// True if `sql` is a `ROLLBACK TO [SAVEPOINT] ...` statement, in any of its
+// forms: `ROLLBACK TO sp`, `ROLLBACK TRANSACTION TO sp`,
+// `ROLLBACK TRANSACTION TO SAVEPOINT sp`, with SQL comments between the
+// keywords.
+//
+// sqflite_common derives the `inTransaction` argument from the statement
+// text (`startsWith('rollback')`), so both a plain `ROLLBACK` and
+// `ROLLBACK TO savepoint` arrive with `inTransaction: false`. Only the
+// former ends the surrounding transaction; the latter must keep it, or a
+// transaction the client still considers open would silently turn into
+// autocommit.
+static bool isRollbackToSavepoint(const std::string& sql) {
+  // Skips whitespace and SQL comments (`/* ... */` and `-- ...`), returning
+  // the index of the next token.
+  const auto skip = [&sql](size_t pos) {
+    while (pos < sql.size()) {
+      const auto c = static_cast<unsigned char>(sql[pos]);
+      if (std::isspace(c)) {
+        ++pos;
+      } else if (c == '/' && pos + 1 < sql.size() && sql[pos + 1] == '*') {
+        const auto end = sql.find("*/", pos + 2);
+        pos = (end == std::string::npos) ? sql.size() : end + 2;
+      } else if (c == '-' && pos + 1 < sql.size() && sql[pos + 1] == '-') {
+        const auto end = sql.find('\n', pos);
+        pos = (end == std::string::npos) ? sql.size() : end + 1;
+      } else {
+        break;
+      }
+    }
+    return pos;
+  };
+  // True if a whole (case-insensitive) word `word` starts at `pos`.
+  const auto isWord = [](const std::string& s, size_t pos, const char* word) {
+    const size_t n = std::strlen(word);
+    if (pos > s.size() || s.size() - pos < n) {
+      return false;
+    }
+    for (size_t k = 0; k < n; ++k) {
+      if (std::toupper(static_cast<unsigned char>(s[pos + k])) != word[k]) {
+        return false;
+      }
+    }
+    const size_t end = pos + n;
+    return end == s.size() || !std::isalnum(static_cast<unsigned char>(s[end]));
+  };
+  size_t i = skip(0);
+  if (!isWord(sql, i, "ROLLBACK")) {
+    return false;
+  }
+  i = skip(i + std::strlen("ROLLBACK"));
+  // `TRANSACTION` is optional and does not change the meaning: both
+  // `ROLLBACK TO ...` and `ROLLBACK TRANSACTION TO ...` roll back to a
+  // savepoint only and keep the surrounding transaction open.
+  if (isWord(sql, i, "TRANSACTION")) {
+    i = skip(i + std::strlen("TRANSACTION"));
+  }
+  return isWord(sql, i, "TO");
+}
+
 SqfliteSqlcipherAuroraPlugin::SqfliteSqlcipherAuroraPlugin(cw::PluginRegistrar* registrar)
     : cw::BasicPlugin<>(Channels::Methods, registrar->messenger())
     , app_(registrar->app())
     , dbID_(0)
     , logger_(Logger::Level::None, "sqflite_sqlcipher")
-{}
+{
+  // Backstop for exceptions escaping an async task: every task pushed by
+  // this plugin is wrapped (enqueueTask) so that a throw answers its call
+  // with an error; this handler only logs anything that slips past those
+  // wrappers, instead of the previous silent swallow.
+  asyncQueue_.setExceptionHandler([this](const std::string &message) {
+    logger_.error() << "unhandled exception in async task: " << message
+                    << std::endl;
+  });
+}
 
 bool SqfliteSqlcipherAuroraPlugin::Preprocess(const SqfliteSqlcipherAuroraPlugin::Call& call, SqfliteSqlcipherAuroraPlugin::MethodResultPtr& result) {
   if (call.method_name() == Methods::OpenDatabase) {
@@ -171,7 +340,9 @@ void SqfliteSqlcipherAuroraPlugin::onOpenDatabaseCall(const MethodCall &call, st
   const auto db =
       std::make_shared<Database>(++dbID_, dbPath, isSingleInstance, logger_);
 
-  asyncQueue_.push([this, db, readOnly, password, result = std::shared_ptr<MethodResult>(std::move(result))] {
+  const auto reply = std::make_shared<Reply>(std::move(result));
+  enqueueTask(asyncQueue_, reply,
+              [this, db, readOnly, password, result = reply] {
     logger_.sql() << "open database " + db->path() + " (ID=" << db->id() << ")"
                    << std::endl;
 
@@ -198,7 +369,8 @@ void SqfliteSqlcipherAuroraPlugin::onCloseDatabaseCall(const MethodCall& call, s
   const auto dbID = args->GetValue<int>(Arguments::Id).value_or(-1);
   const auto db = databaseByID(dbID);
 
-  asyncQueue_.push([this, db, dbID, result = std::shared_ptr<MethodResult>(std::move(result))] {
+  const auto reply = std::make_shared<Reply>(std::move(result));
+  enqueueTask(asyncQueue_, reply, [this, db, dbID, result = reply] {
     if (!db) {
       result->Error(Errors::Sqflite,
                     formatError(Errors::Closed, "database closed",
@@ -231,7 +403,8 @@ void SqfliteSqlcipherAuroraPlugin::onDeleteDatabaseCall(const MethodCall& call, 
   const auto dbPath = args->GetValue<std::string>(Arguments::Path).value_or("");
   const auto db = databaseByPath(dbPath);
 
-  asyncQueue_.push([this, db, dbPath, result = std::shared_ptr<MethodResult>(std::move(result))] {
+  const auto reply = std::make_shared<Reply>(std::move(result));
+  enqueueTask(asyncQueue_, reply, [this, db, dbPath, result = reply] {
     if (db) {
       if (db->isOpen()) {
         logger_.verb() << "close database " << db->path()
@@ -248,9 +421,42 @@ void SqfliteSqlcipherAuroraPlugin::onDeleteDatabaseCall(const MethodCall& call, 
       databaseRemove(db);
     }
 
-    if (std::filesystem::exists(dbPath)) {
-      logger_.verb() << "delete not opened database " << dbPath << std::endl;
-      std::filesystem::remove(dbPath);
+    // Delete the database file and every sidecar. A clean close normally
+    // merges the WAL and removes -wal/-shm, but a crash or unclean close (or
+    // a rollback journal) can leave them behind; deleteDatabase must leave no
+    // trace. The non-throwing overloads (std::error_code) are used so that a
+    // filesystem failure (e.g. a sidecar path that is a directory, or a
+    // directory without write permission) becomes a reported error instead of
+    // an exception lost in the async queue, which would hang the Dart Future.
+    auto removeFile = [this, result](const std::filesystem::path& path,
+                                     const char* what) {
+      std::error_code ec;
+      if (!std::filesystem::exists(path, ec)) {
+        if (ec) {
+          result->Error(Errors::Internal, formatError(Errors::Internal, path.string(),
+                                                      "failed to check for the file: " +
+                                                          ec.message()));
+        }
+        // A missing file is the success case: nothing to delete.
+        return !ec;
+      }
+
+      logger_.verb() << "delete " << what << " " << path << std::endl;
+      if (!std::filesystem::remove(path, ec) || ec) {
+        result->Error(Errors::Internal,
+                      formatError(Errors::Internal, path.string(),
+                                  std::string("failed to remove the ") + what + ": " +
+                                              ec.message()));
+        return false;
+      }
+      return true;
+    };
+
+    if (!removeFile(dbPath, "the database file") ||
+        !removeFile(dbPath + "-journal", "the journal file") ||
+        !removeFile(dbPath + "-wal", "the WAL file") ||
+        !removeFile(dbPath + "-shm", "the SHM file")) {
+      return;  // The error has already been reported.
     }
 
     result->Success();
@@ -266,14 +472,17 @@ void SqfliteSqlcipherAuroraPlugin::onExecuteCall(const MethodCall& call, std::un
 
   const auto dbID = args->GetValue<int>(Arguments::Id).value_or(-1);
   const auto sql = args->GetValue<std::string>(Arguments::Sql).value_or("");
+  // Three-valued: nullopt means "no change" (a regular statement inside a
+  // transaction does not carry the flag), true = BEGIN, false =
+  // COMMIT/ROLLBACK.
   const auto inTransactionChange =
-      args->GetValue<bool>(Arguments::InTransaction).value_or(false);
+      args->GetValue<bool>(Arguments::InTransaction);
   const auto sqlArgs = args->GetValue<EncodableList>(Arguments::SqlArguments).value_or(EncodableList());
   const auto transactionID =
       args->GetValue<std::int64_t>(Arguments::TransactionId).value_or(DatabaseTransaction::ID::None);
 
   const auto enteringTransaction =
-      inTransactionChange == true &&
+      inTransactionChange.has_value() && *inTransactionChange &&
       transactionID == DatabaseTransaction::ID::None;
 
   const auto db = databaseByID(dbID);
@@ -285,17 +494,39 @@ void SqfliteSqlcipherAuroraPlugin::onExecuteCall(const MethodCall& call, std::un
     return;
   }
 
-  asyncQueue_.push([this, db, sql, sqlArgs, inTransactionChange,
-                     enteringTransaction, transactionID, result = std::shared_ptr<MethodResult>(std::move(result))] {
-    db->processSqlCommand(transactionID, [this, db, sql, sqlArgs,
-                                          inTransactionChange,
-                                          enteringTransaction, result] {
+  const auto reply = std::make_shared<Reply>(std::move(result));
+  enqueueTask(asyncQueue_, reply,
+              [this, db, sql, sqlArgs, inTransactionChange,
+               enteringTransaction, transactionID, result = reply] {
+    db->processSqlCommand(
+        transactionID,
+        guardSqlCallback(result, [this, db, sql, sqlArgs,
+                                 inTransactionChange,
+                                 enteringTransaction, result] {
       if (enteringTransaction) {
         db->enterInTransaction();
       }
       const auto error = db->execute(sql, sqlArgs);
       if (error) {
-        db->leaveTransaction();
+        if (inTransactionChange.has_value() && !*inTransactionChange &&
+            !isRollbackToSavepoint(sql)) {
+          // A failed COMMIT (or a plain ROLLBACK): the Dart client
+          // (sqflite_common) marks the transaction closed in a `finally`
+          // even when this statement fails and will never reference this id
+          // again. If the handle is still inside the transaction (e.g. a
+          // deferred constraint rejected the COMMIT), roll it back natively
+          // and clear the bookkeeping; keeping the id would leave every
+          // subsequent non-transactional command queued behind it forever.
+          db->abortTransaction();
+        } else {
+          // A failed statement does not end an open transaction (SQLite
+          // keeps it) — including a failed `ROLLBACK TO savepoint`, which
+          // the client flags `inTransaction: false` but which leaves the
+          // transaction the client still considers open intact. A failed
+          // BEGIN leaves no transaction. Align the bookkeeping with the
+          // actual handle state.
+          db->resyncTransactionState();
+        }
         result->Error(Errors::Sqflite,
                       formatError(Errors::Internal, error.message()),
                       makeSqlErrorDetails(sql, sqlArgs));
@@ -306,11 +537,21 @@ void SqfliteSqlcipherAuroraPlugin::onExecuteCall(const MethodCall& call, std::un
             {Arguments::TransactionId, db->currentTransactionID()}});
         return;
       }
-      if (inTransactionChange == false) {
-        db->leaveTransaction();
+      // An explicit "inTransaction: false" means the statement is expected
+      // to end the transaction (COMMIT / plain ROLLBACK). Sync with the
+      // actual handle state instead of assuming it did: a `ROLLBACK TO
+      // savepoint` is also flagged `inTransaction: false` by the client
+      // (the flag is derived from the statement text) but keeps the
+      // transaction open, and so would any statement form the parser above
+      // does not recognize. If the handle is still inside a transaction the
+      // id is kept (a queued foreign command must not run inside it); an
+      // absent flag means "no change", so a regular statement inside a
+      // transaction keeps the state.
+      if (inTransactionChange.has_value() && !*inTransactionChange) {
+        db->resyncTransactionState();
       }
       result->Success();
-    });
+      }));
   });
 }
 
@@ -337,9 +578,22 @@ void SqfliteSqlcipherAuroraPlugin::onQueryCall(const MethodCall& call, std::uniq
     return;
   }
 
-  asyncQueue_.push([this, db, sql, sqlArgs, transactionID, pageSize, result = std::shared_ptr<MethodResult>(std::move(result))] {
+  const auto reply = std::make_shared<Reply>(std::move(result));
+  enqueueTask(asyncQueue_, reply,
+              [this, db, sql, sqlArgs, transactionID, pageSize, result = reply] {
     db->processSqlCommand(
-        transactionID, [this, db, sql, sqlArgs, pageSize, result] {
+        transactionID,
+        guardSqlCallback(result, [this, db, sql, sqlArgs, pageSize,
+                                 result] {
+          // Test hook for
+          // integration_test/deferred_query_exception_test.dart: the
+          // sentinel makes the callback throw when it RUNS - possibly long
+          // after it was queued behind a foreign transaction - exercising
+          // the per-callback guard. It is not valid SQL, so in practice
+          // only that test ever sends it.
+          if (sql == "THROW_STD_EXCEPTION") {
+            throw std::runtime_error("injected exception (test hook)");
+          }
           EncodableMap response;
           utils::error error;
           if (pageSize <= 0) {
@@ -354,7 +608,7 @@ void SqfliteSqlcipherAuroraPlugin::onQueryCall(const MethodCall& call, std::uniq
             return;
           }
           result->Success(response);
-        });
+          }));
   });
 }
 
@@ -380,9 +634,13 @@ void SqfliteSqlcipherAuroraPlugin::onQueryCursorNextCall(const MethodCall& call,
     return;
   }
 
-  asyncQueue_.push([this, db, cursorID, closeCursor, transactionID, result = std::shared_ptr<MethodResult>(std::move(result))] {
-    db->processSqlCommand(transactionID, [this, db, cursorID, closeCursor,
-                                          result] {
+  const auto reply = std::make_shared<Reply>(std::move(result));
+  enqueueTask(asyncQueue_, reply,
+              [this, db, cursorID, closeCursor, transactionID, result = reply] {
+    db->processSqlCommand(
+        transactionID,
+        guardSqlCallback(result, [this, db, cursorID, closeCursor,
+                                 result] {
       EncodableMap response;
       const auto error = db->queryCursorNext(cursorID, closeCursor, response);
       if (error) {
@@ -391,7 +649,7 @@ void SqfliteSqlcipherAuroraPlugin::onQueryCursorNextCall(const MethodCall& call,
         return;
       }
       result->Success(response);
-    });
+      }));
   });
 }
 
@@ -417,8 +675,12 @@ void SqfliteSqlcipherAuroraPlugin::onUpdateCall(const MethodCall& call, std::uni
     return;
   }
 
-  asyncQueue_.push([this, db, sql, sqlArgs, transactionID, result = std::shared_ptr<MethodResult>(std::move(result))] {
-    db->processSqlCommand(transactionID, [this, db, sql, sqlArgs, result] {
+  const auto reply = std::make_shared<Reply>(std::move(result));
+  enqueueTask(asyncQueue_, reply,
+              [this, db, sql, sqlArgs, transactionID, result = reply] {
+    db->processSqlCommand(
+        transactionID,
+        guardSqlCallback(result, [this, db, sql, sqlArgs, result] {
       int updated = 0;
       const auto error = db->update(sql, sqlArgs, updated);
       if (error) {
@@ -428,7 +690,7 @@ void SqfliteSqlcipherAuroraPlugin::onUpdateCall(const MethodCall& call, std::uni
         return;
       }
       result->Success(updated);
-    });
+      }));
   });
 }
 
@@ -454,9 +716,15 @@ void SqfliteSqlcipherAuroraPlugin::onInsertCall(const MethodCall& call, std::uni
     return;
   }
 
-  asyncQueue_.push([this, db, sql, sqlArgs, transactionID, result = std::shared_ptr<MethodResult>(std::move(result))] {
-    db->processSqlCommand(transactionID, [this, db, sql, sqlArgs, result] {
-      int insertID = 0;
+  const auto reply = std::make_shared<Reply>(std::move(result));
+  enqueueTask(asyncQueue_, reply,
+              [this, db, sql, sqlArgs, transactionID, result = reply] {
+    db->processSqlCommand(
+        transactionID,
+        guardSqlCallback(result, [this, db, sql, sqlArgs, result] {
+      // 64-bit: rowids above 2^31-1 (e.g. 4294967297) must survive the
+      // round trip, so the value is sent as int64, not int32.
+      int64_t insertID = 0;
       const auto error = db->insert(sql, sqlArgs, insertID);
       if (error) {
         result->Error(Errors::Sqflite,
@@ -469,7 +737,7 @@ void SqfliteSqlcipherAuroraPlugin::onInsertCall(const MethodCall& call, std::uni
       } else {
         result->Success(insertID);
       }
-    });
+      }));
   });
 }
 
@@ -508,10 +776,12 @@ void SqfliteSqlcipherAuroraPlugin::onBatchCall(const MethodCall& call, std::uniq
         });
   }
 
-  asyncQueue_.push([this, db, dbOperations, transactionID, continueOnError,
-                     noResult, result = std::shared_ptr<MethodResult>(std::move(result))] {
+  const auto reply = std::make_shared<Reply>(std::move(result));
+  enqueueTask(asyncQueue_, reply,
+              [this, db, dbOperations, transactionID, continueOnError,
+               noResult, result = reply] {
     const auto command = [this, db, dbOperations, continueOnError, noResult,
-                          result = std::shared_ptr<MethodResult>(std::move(result))] {
+                          result] {
       EncodableList results;
       const auto error = db->batch(dbOperations, continueOnError, results);
       if (error) {
@@ -525,7 +795,8 @@ void SqfliteSqlcipherAuroraPlugin::onBatchCall(const MethodCall& call, std::uniq
         result->Success(results);
       }
     };
-    db->processSqlCommand(transactionID, command);
+    db->processSqlCommand(transactionID,
+                           guardSqlCallback(result, std::move(command)));
   });
 }
 
