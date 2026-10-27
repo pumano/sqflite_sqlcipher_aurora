@@ -50,18 +50,32 @@ public:
                                  const EncodableList &args, int64_t pageSize,
                                  EncodableMap &result);
   utils::error insert(const std::string &sql, const EncodableList &args,
-                      int &insertID);
+                      int64_t &insertID);
   utils::error update(const std::string &sql, const EncodableList &args,
                       int &updated);
   utils::error batch(const std::vector<Operation> &operations,
                      bool continueOnError, EncodableList &results);
 
   void enterInTransaction();
-  void leaveTransaction();
   int currentTransactionID();
 
   using SqlCommandCallback = std::function<void()>;
+  struct PendingSqlCommand {
+    int transactionID;
+    SqlCommandCallback callback;
+  };
   void processSqlCommand(int transactionID, const SqlCommandCallback &callback);
+  void drainPendingSqlCallbacks();
+  // Align the transaction bookkeeping with the actual state of the SQLite
+  // handle (sqlite3_get_autocommit): if the handle is not in a transaction,
+  // the bookkeeping must not claim one either.
+  void resyncTransactionState();
+  // End the transaction if the handle is still inside one (best-effort
+  // ROLLBACK) and clear the bookkeeping. Used after a failed COMMIT/
+  // ROLLBACK: the Dart client marks the transaction closed and will never
+  // reference this id again, so keeping it would block the queued
+  // non-transactional commands forever.
+  void abortTransaction();
 
   bool isOpen() const;
   bool isSingleInstance() const;
@@ -88,9 +102,13 @@ public:
   bool isSingleInstance_;
   bool isReadOnly_;
   Logger logger_;
+  // Worker-only: monotonically grows in enterInTransaction(), never read
+  // off the worker thread.
   int transactionID_;
+  // Atomic: written by the worker (enter/abort/resync) and read from the
+  // channel thread by isInTransaction() (single-instance re-open check).
   int currentTransactionID_;
-  std::queue<SqlCommandCallback> pendingSqlCallbacks_;
+  std::queue<PendingSqlCommand> pendingSqlCallbacks_;
   int64_t cursorID_;
   std::unordered_map<int64_t, Cursor> cursors_;
   sqlite3 *db_;

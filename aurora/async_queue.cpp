@@ -44,6 +44,11 @@ void AsyncQueue::push(const Task &task) {
   }
 }
 
+void AsyncQueue::setExceptionHandler(ExceptionHandler handler) {
+  std::lock_guard<std::mutex> lock(taskMutex_);
+  exceptionHandler_ = std::move(handler);
+}
+
 void AsyncQueue::executeTasks() {
   for (;;) {
     std::vector<Task> tasks;
@@ -63,7 +68,19 @@ void AsyncQueue::executeTasks() {
 
       try {
         task();
+      } catch (const std::exception &e) {
+        // The task threw before finishing. The queue is a generic utility
+        // and cannot answer the channel call itself (it has no access to
+        // the task's MethodResult); report the exception so it is at least
+        // visible instead of the previous silent swallow. The plugin wraps
+        // its tasks (enqueueTask) so the call is answered there.
+        std::lock_guard<std::mutex> lock(taskMutex_);
+        if (exceptionHandler_)
+          exceptionHandler_(e.what() ? e.what() : "unknown exception");
       } catch (...) {
+        std::lock_guard<std::mutex> lock(taskMutex_);
+        if (exceptionHandler_)
+          exceptionHandler_("unknown non-std exception");
       }
     }
   }
