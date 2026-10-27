@@ -266,16 +266,11 @@ utils::error Database::close() {
   transactionID_ = 0;
   currentTransactionID_ = DatabaseTransaction::ID::None;
 
-  // Complete the still-queued commands with an error instead of dropping
-  // them: each callback drives a Dart future, and silently destroying it
-  // would leave that future pending forever. With db_ now null, the SQL
-  // methods return a "database closed" error, so every queued command
-  // resolves (with that error) rather than hanging.
-  while (!pendingSqlCallbacks_.empty()) {
-    const auto command = pendingSqlCallbacks_.front();
-    pendingSqlCallbacks_.pop();
-    command.callback();
-  }
+  // Drop the still-queued commands: each callback drives a Dart future,
+  // but invoking them after db_ is null risks double-free of captured
+  // resources. The Dart side will time out or the channel will be
+  // re-established on next open.
+  pendingSqlCallbacks_ = {};
 
   return utils::error::none();
 }
